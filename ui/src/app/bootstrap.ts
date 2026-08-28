@@ -38,6 +38,7 @@ import { createBrowserHistory, resolveControlUiPaths } from "./browser.ts";
 import { createChatAttachmentHandoff } from "./chat-attachment-handoff.ts";
 import { createChatSubmissions } from "./chat-submissions.ts";
 import { createApplicationConfigCapability } from "./config.ts";
+import { createConnectionBootstrapCoordinator } from "./connection-bootstrap.ts";
 import type {
   ApplicationNavigationOptions,
   ApplicationContext,
@@ -377,6 +378,7 @@ export function bootstrapApplication(
         : {}),
     },
   );
+  const connectionBootstrap = createConnectionBootstrapCoordinator();
   const agents = createAgentCapability(gateway);
   const startupLifecycle = createStartupLifecycle();
   const deferInitialLocationUntilGateway =
@@ -434,10 +436,11 @@ export function bootstrapApplication(
       password: startup.password ?? "",
     },
   });
-  const sessions = createSessionCapability(gateway);
+  const sessions = createSessionCapability(gateway, { connectionBootstrap });
   const workboard = createWorkboardCapability();
   const runtimeConfig = createRuntimeConfigCapability(gateway);
   const overlays = createApplicationOverlays(gateway, {
+    connectionBootstrap,
     drainConfigWrites: () => runtimeConfig.waitForPendingWrites(),
   });
   // App-updater interlock: writing config (or restarting the gateway) while
@@ -463,7 +466,7 @@ export function bootstrapApplication(
       document.querySelector("openclaw-app-shell")?.isConnected === true,
   });
   const nativeNotifications = createNativeNotificationsCapability();
-  const webPush = createWebPushCapability(gateway);
+  const webPush = createWebPushCapability(gateway, { connectionBootstrap });
   const skillWorkshopRevisionAdmissions = createSkillWorkshopRevisionAdmissions();
   const chatSubmissions = createChatSubmissions();
   const placementStartup = createApplicationPlacementStartup({
@@ -491,30 +494,43 @@ export function bootstrapApplication(
   let lastPostConnectClient: GatewayBrowserClient | null = null;
   let lastRecoveryClient: GatewayBrowserClient | null = null;
   const stopPostConnect = gateway.subscribe((snapshot) => {
+    connectionBootstrap.synchronize({
+      client: snapshot.client,
+      connected: snapshot.phase === "connected",
+    });
     if (snapshot.phase !== "connected" || !snapshot.client) {
       lastPostConnectClient = null;
       lastRecoveryClient = null;
       return;
     }
-    if (lastPostConnectClient !== snapshot.client) {
-      lastPostConnectClient = snapshot.client;
-      void config.refresh({
-        auth: {
-          hello: snapshot.hello,
-          settings: { token: gateway.connection.token },
-          password: gateway.connection.password,
-        },
-      });
-      void sendSessionObserverVisibility(
-        snapshot.client,
-        loadChatObserverDisplayPreference() !== "off",
-      ).catch(() => undefined);
+    const client = snapshot.client;
+    if (lastPostConnectClient !== client) {
+      lastPostConnectClient = client;
+      void connectionBootstrap
+        .run("config", async () => {
+          await config.refresh({
+            auth: {
+              hello: snapshot.hello,
+              settings: { token: gateway.connection.token },
+              password: gateway.connection.password,
+            },
+          });
+        })
+        .catch(() => undefined);
+      void connectionBootstrap
+        .run("session-observer", async () => {
+          await sendSessionObserverVisibility(
+            client,
+            loadChatObserverDisplayPreference() !== "off",
+          );
+        })
+        .catch(() => undefined);
     }
     // Recovery scope resolves after hello, so dedupe its later publication independently.
-    if (!snapshot.client.recoveryScopeReady || lastRecoveryClient === snapshot.client) {
+    if (!client.recoveryScopeReady || lastRecoveryClient === client) {
       return;
     }
-    lastRecoveryClient = snapshot.client;
+    lastRecoveryClient = client;
     placementStartup.resumeRecovery();
   });
   const routeLocation = (routeId: RouteId, options?: ApplicationNavigationOptions) => {
@@ -586,6 +602,7 @@ export function bootstrapApplication(
     basePath,
     resourceBasePath,
     gateway,
+    connectionBootstrap,
     agents,
     agentIdentity,
     agentSelection,
@@ -710,6 +727,7 @@ export function bootstrapApplication(
     stop: () => {
       startupLifecycle.stop();
       stopPostConnect();
+      connectionBootstrap.reset();
       agents.dispose();
       channels.dispose();
       scopeUpgrade.dispose();

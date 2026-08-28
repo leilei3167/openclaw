@@ -29,6 +29,7 @@ import {
 import { extendPreparedDispatchState } from "./dispatch-from-config.phase-state.js";
 import type { PrepareDispatchExecutionReadyState } from "./dispatch-from-config.prepare-execution.js";
 import { requireQueuedReplyDelivery } from "./dispatch-from-config.turn-ledger.js";
+import type { PendingContinuationSettlement } from "./get-reply.types.js";
 import { bindPreparedReplyDispatchRuntime } from "./prepared-reply-dispatch-context.js";
 import { REPLY_OPERATION_RUN_STATE } from "./reply-operation-run-state.js";
 
@@ -79,6 +80,7 @@ export async function executeDispatch(state: PrepareDispatchExecutionReadyState)
   );
   let deliberateSilentTerminalReply = false;
   let pendingContinuation = false;
+  let pendingContinuationSettlement: PendingContinuationSettlement | undefined;
   let didDeliverVisiblePartialReply = false;
   const flushDeferredFinalText = async () => {
     try {
@@ -126,8 +128,9 @@ export async function executeDispatch(state: PrepareDispatchExecutionReadyState)
                   onDeliberateSilentTerminalReply: () => {
                     deliberateSilentTerminalReply = true;
                   },
-                  onPendingContinuation: () => {
+                  onPendingContinuation: (settlement) => {
                     pendingContinuation = true;
+                    pendingContinuationSettlement ??= settlement;
                   },
                   onSessionMetadataChanges: notifySessionMetadataChanges,
                   onSessionPrepared: state.notePreparedSession,
@@ -656,6 +659,7 @@ export async function executeDispatch(state: PrepareDispatchExecutionReadyState)
   const nextState = extendPreparedDispatchState(state, {
     deliberateSilentTerminalReply,
     pendingContinuation,
+    pendingContinuationSettlement,
     replyResult,
   });
   return { status: "ready" as const, state: nextState };

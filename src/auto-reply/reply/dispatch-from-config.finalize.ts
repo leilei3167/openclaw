@@ -50,6 +50,7 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
     markInboundDedupeReplayUnsafe,
     noVisibleReplyFallbackDirected,
     pendingContinuation,
+    pendingContinuationSettlement,
     replyResult,
     replyRoute,
     routeReplyToOriginating,
@@ -89,15 +90,41 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
   const sentFinalPayloadDedupeKeys = new Set<string>();
   let deferredTtsTextPending = state.progressState.accumulatedBlockTtsText;
   for (const [replyIndex, reply] of replies.entries()) {
+    const continuationSettlement =
+      pendingContinuationSettlement?.statusPayload === reply
+        ? pendingContinuationSettlement
+        : undefined;
+    const settleContinuation = async (statusDelivered: boolean) => {
+      if (!continuationSettlement) {
+        return;
+      }
+      try {
+        await continuationSettlement.settle(statusDelivered);
+      } catch (error) {
+        if (!statusDelivered) {
+          throw error;
+        }
+        // A delivered waiting status must not strand its child completion when
+        // the batch handoff races a replaced registry row. Release the child
+        // to its normal terminal-delivery owner instead.
+        logVerbose(
+          `dispatch-from-config: continuation batch handoff failed: ${formatErrorMessage(error)}`,
+        );
+        await continuationSettlement.settle(false);
+      }
+    };
+    const releaseContinuationSettlement = () => settleContinuation(false);
     throwIfDispatchOperationAborted();
     // Durable reasoning is a channel-owned lane; generic channels keep the
     // historical suppression unless they explicitly opt in.
     if (reply.isReasoning === true && !state.reasoningPayloadsEnabled) {
       await suppressPendingFinalDelivery(reply);
+      await releaseContinuationSettlement();
       continue;
     }
     if (reply.isCommentary === true && !state.commentaryPayloadsEnabled) {
       await suppressPendingFinalDelivery(reply);
+      await releaseContinuationSettlement();
       continue;
     }
     if (suppressDelivery && !shouldDeliverDespiteSourceReplySuppression(reply, state)) {
@@ -116,11 +143,13 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
         );
       }
       await suppressPendingFinalDelivery(reply);
+      await releaseContinuationSettlement();
       continue;
     }
     const finalPayloadDedupeKey = createFinalDispatchPayloadDedupeKey(reply);
     if (sentFinalPayloadDedupeKeys.has(finalPayloadDedupeKey)) {
       await suppressPendingFinalDelivery(reply);
+      await releaseContinuationSettlement();
       continue;
     }
     sentFinalPayloadDedupeKeys.add(finalPayloadDedupeKey);
@@ -135,10 +164,12 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
     });
     if (finalReply.sessionWriterDeliveryRevoked) {
       sessionWriterDeliveryRevoked = true;
+      await releaseContinuationSettlement();
       continue;
     }
     if (finalReply.suppressionReason) {
       channelTransformSuppressedFinal ||= finalReply.suppressionReason === "channel_transform";
+      await releaseContinuationSettlement();
       continue;
     }
     acceptedFinal = true;
@@ -148,6 +179,7 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
     if (finalReply.dedupedAgainstBlock) {
       // The delivering block already settled into the turn ledger.
       await suppressPendingFinalDelivery(reply);
+      await releaseContinuationSettlement();
       continue;
     }
     attemptedFinalDelivery = true;
@@ -160,8 +192,17 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
         allQueuedFinalsObserved = false;
       }
     }
-    if (!finalReply.queuedFinal && finalReply.routedFinalCount === 0) {
-      finalDeliveryFailed = true;
+    if (continuationSettlement) {
+      if (finalReply.queuedFinal) {
+        registerReplyDispatcherSettledTask(dispatcher, async () => {
+          const outcome = await finalReply.dispatcherOutcome;
+          // A post-send error can leave visibility unknown. Only an acknowledged
+          // status may yield the requester and hold child completion delivery.
+          await settleContinuation(outcome === "delivered");
+        });
+      } else {
+        await settleContinuation(finalReply.routedFinalCount > 0);
+      }
     }
   }
   const channelTransformSuppressed =
@@ -169,7 +210,7 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
     !state.progressState.acceptedReplyPayload &&
     !acceptedFinal;
 
-  if (attemptedFinalDelivery && !finalDeliveryFailed) {
+  if (attemptedFinalDelivery) {
     if (queuedFinal && allQueuedFinalsObserved) {
       // Delivery observers run from the queue itself, so direct low-level callers
       // reconcile too; the settle task only makes lifecycle owners await it.

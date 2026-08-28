@@ -1,6 +1,7 @@
 import type { SessionCatalogPullRequestSummary } from "../../../../packages/gateway-protocol/src/schema/sessions-catalog.js";
 import { GatewayRequestError, type GatewayEventFrame } from "../../api/gateway.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
+import type { ConnectionBootstrapCoordinator } from "../../app/connection-bootstrap.ts";
 import { formatUiError } from "../format-error.ts";
 import { createGatewayConnectionLifecycle } from "../gateway-connection-lifecycle.ts";
 import type { SessionCreateOutcome } from "./create.ts";
@@ -83,7 +84,10 @@ function isSessionStateEvent(event: GatewayEventFrame): boolean {
   return event.event === "sessions.changed" || event.event === "session.message";
 }
 
-export function createSessionCapability(gateway: SessionGateway): SessionCapability {
+export function createSessionCapability(
+  gateway: SessionGateway,
+  hooks: { connectionBootstrap?: ConnectionBootstrapCoordinator } = {},
+): SessionCapability {
   let state: SessionState = {
     result: null,
     agentId: null,
@@ -502,7 +506,7 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
         roster.scheduleEvent();
         return;
       }
-      void (async () => {
+      const hydrate = async () => {
         if (connection.isCurrent(scope)) {
           const sessionKey = gateway.snapshot.sessionKey?.trim();
           const agentScope = sessionKey
@@ -520,7 +524,10 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
             await roster.refreshManagedLists();
           }
         }
-      })();
+      };
+      void (hooks.connectionBootstrap?.run("sessions", hydrate) ?? hydrate()).catch(
+        () => undefined,
+      );
     }
   });
 

@@ -11,6 +11,7 @@ import type { WorkboardCapability } from "../lib/workboard/capability.ts";
 import type { AgentSelectionCapability } from "./agent-selection.ts";
 import type { ApplicationChatSubmissions } from "./chat-submissions.ts";
 import type { ApplicationConfigCapability } from "./config.ts";
+import type { ConnectionBootstrapCoordinator } from "./connection-bootstrap.ts";
 import type { ScopeUpgradeCapability } from "./device-scope-upgrade.ts";
 import type { ApplicationGateway } from "./gateway.ts";
 import type { NativeChatDrafts } from "./native-bridge.ts";
@@ -91,6 +92,8 @@ export type ApplicationContext<TRouteId extends string = string> = {
   readonly basePath: string;
   readonly resourceBasePath: string;
   readonly gateway: ApplicationGateway;
+  /** App-owned queue for automatic Gateway reconnect bootstrap work. */
+  readonly connectionBootstrap?: ConnectionBootstrapCoordinator;
   readonly agents: AgentCapability;
   readonly agentIdentity: AgentIdentityCapability;
   readonly agentSelection: AgentSelectionCapability;
