@@ -81,6 +81,11 @@ export async function executeDispatch(state: PrepareDispatchExecutionReadyState)
   let deliberateSilentTerminalReply = false;
   let pendingContinuation = false;
   let pendingContinuationSettlement: PendingContinuationSettlement | undefined;
+  const releasePendingContinuation = async () => {
+    const settlement = pendingContinuationSettlement;
+    pendingContinuationSettlement = undefined;
+    await settlement?.settle(false);
+  };
   let didDeliverVisiblePartialReply = false;
   const flushDeferredFinalText = async () => {
     try {
@@ -601,6 +606,7 @@ export async function executeDispatch(state: PrepareDispatchExecutionReadyState)
         trackDispatchLifecycleWork,
       ),
   ).catch(async (error: unknown) => {
+    await releasePendingContinuation();
     await flushDeferredFinalText();
     const failedAgentRun = getAgentRunTerminalOutcome() === "failed";
     const adopted = state.turnAdoptionState?.adopted === true;
@@ -638,9 +644,11 @@ export async function executeDispatch(state: PrepareDispatchExecutionReadyState)
     ? ({ status: "ready" } as const)
     : await state.ensureDispatchReplyOperation("dispatch");
   if (finalDispatchAcquisition.status === "aborted") {
+    await releasePendingContinuation();
     return { status: "complete" as const, result: state.finishReplyOperationAbortedDispatch() };
   }
   if (finalDispatchAcquisition.status === "busy") {
+    await releasePendingContinuation();
     return {
       status: "complete" as const,
       result: state.finishReplyOperationBusyDispatch({
@@ -654,6 +662,7 @@ export async function executeDispatch(state: PrepareDispatchExecutionReadyState)
 
   const acpTailResult = await handleAcpDispatchTailAfterReset(state);
   if (acpTailResult) {
+    await releasePendingContinuation();
     return acpTailResult;
   }
   const nextState = extendPreparedDispatchState(state, {

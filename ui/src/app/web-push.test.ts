@@ -216,7 +216,7 @@ describe("web push Gateway reconciliation", () => {
     const coordinatorRuns: string[] = [];
     const coordinator = {
       reset: () => {},
-      run: async (key, task) => {
+      run: async (key: string, task: () => Promise<unknown>) => {
         coordinatorRuns.push(key);
         await task();
       },
@@ -289,6 +289,7 @@ describe("web push Gateway reconciliation", () => {
     capability.dispose();
   });
 
+<<<<<<< HEAD
   it("refreshes matching defaults without publishing a stale invalidation", async () => {
     const initial = notificationPreferences(true);
     const stale = { ...notificationPreferences(true), detailLevel: "detailed" as const };
@@ -318,6 +319,26 @@ describe("web push Gateway reconciliation", () => {
     const capability = createWebPushCapability(harness.gateway);
     harness.connect({ request } as unknown as GatewayBrowserClient, "profile-owner");
     await vi.waitFor(() => expect(capability.snapshot.preferences?.user).toEqual(initial));
+=======
+  it("does not subscribe after its connection is replaced", async () => {
+    const reconcileSubscription = deferred<typeof subscription | null>();
+    const getSubscription = vi
+      .fn<() => Promise<typeof subscription | null>>()
+      .mockResolvedValueOnce(null)
+      .mockReturnValueOnce(reconcileSubscription.promise);
+    enableWebPush(getSubscription);
+    const coordinator = {
+      reset: () => {},
+      run: async (_key: string, task: () => Promise<unknown>) => {
+        await task();
+      },
+      synchronize: () => {},
+    } satisfies ConnectionBootstrapCoordinator;
+    const request = vi.fn<RequestFn>(async () => ({}));
+    const harness = createGatewayHarness(null, false);
+    const webPush = createWebPushCapability(harness.gateway, { connectionBootstrap: coordinator });
+    await flushMicrotasks();
+>>>>>>> b2638a0b9d7 (fix: complete continuation and bootstrap cleanup)
 
     harness.emit({
       type: "event",
