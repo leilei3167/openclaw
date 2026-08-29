@@ -162,6 +162,7 @@ type SpawnAcpResultFields = {
   runId?: string;
   mode?: SpawnAcpMode;
   runTimeoutSeconds?: number;
+  expectsCompletionMessage?: boolean;
   inlineDelivery?: boolean;
   note?: string;
 };
@@ -648,6 +649,7 @@ export async function spawnAcpDirect(
   if (admissionReservation && !admissionReservation.ok) {
     return rejectSubagentPolicy(admissionReservation.error);
   }
+  let expectsCompletionMessage = false;
   const pipelineResult = await runSpawnPipeline({
     adapter,
     admissionReservation,
@@ -656,6 +658,7 @@ export async function spawnAcpDirect(
     progressSessionKey: ownership.completionRequesterSessionKey,
     buildRegistration: (state, runId) => {
       const inlineDelivery = state.deliveryPlan?.useInlineDelivery === true;
+      expectsCompletionMessage = !inlineDelivery && params.expectsCompletionMessage !== false;
       return {
         runId,
         requesterTurnRunId: ctx.requesterTurnRunId,
@@ -672,9 +675,7 @@ export async function spawnAcpDirect(
         cleanup: spawnMode === "session" ? "keep" : params.cleanup === "delete" ? "delete" : "keep",
         label: params.label,
         runTimeoutSeconds,
-        expectsCompletionMessage: inlineDelivery
-          ? false
-          : params.expectsCompletionMessage !== false,
+        expectsCompletionMessage,
         spawnMode,
       };
     },
@@ -713,6 +714,7 @@ export async function spawnAcpDirect(
     runId: pipelineResult.runId,
     mode: spawnMode,
     runTimeoutSeconds,
+    expectsCompletionMessage,
     ...(pipelineResult.state.deliveryPlan?.useInlineDelivery ? { inlineDelivery: true } : {}),
     note: spawnMode === "session" ? ACP_SPAWN_SESSION_ACCEPTED_NOTE : ACP_SPAWN_ACCEPTED_NOTE,
   };
