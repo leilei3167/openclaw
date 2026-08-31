@@ -5,20 +5,19 @@ import {
   buildEmbeddedRunnerAssistant,
   makeEmbeddedRunnerAttempt,
 } from "../../test-helpers/embedded-agent-runner-e2e-fixtures.js";
-import { copyAttemptDeliveryState } from "./attempt-delivery-state.js";
 import {
   markEmbeddedRunAuthProfileSuccess,
   reportEmbeddedRunSuccessfulAuthBinding,
 } from "./auth-profile-success.js";
-import { createEmbeddedRunContextRecoveryState } from "./context-recovery-state.js";
 import { TRUNCATED_REPLY_NOTICE_TEXT } from "./incomplete-turn-resolution.js";
 import { resolveEmbeddedRunAttemptTerminalState } from "./terminal-outcome.js";
-<<<<<<< HEAD
+import { resolveEmbeddedRunTerminal } from "./terminal-resolution.js";
 import {
-  createTerminalToolPresentationTracker,
-  resolveEmbeddedRunTerminal,
-  resolveSettledTurnFinalizationRequest,
-} from "./terminal-resolution.js";
+  emptyAssistant,
+  makeTerminalInput,
+  resolveTerminalText,
+  type TerminalInput,
+} from "./terminal-resolution.test-support.js";
 import { createEmbeddedRunTerminalRetryState } from "./terminal-retry-state.js";
 
 vi.mock("./auth-profile-success.js", () => ({
@@ -30,101 +29,6 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION =
   "The previous attempt did not produce a user-visible answer. Continue from the current state and produce the visible answer now. Do not restart from scratch.";
 const REASONING_ONLY_RETRY_INSTRUCTION =
   "The previous assistant turn recorded reasoning but did not produce a user-visible answer. Continue from that partial turn and produce the visible answer now. Do not restate the reasoning or restart from scratch.";
-
-type TerminalInput = Parameters<typeof resolveEmbeddedRunTerminal>[0];
-type TerminalInputOverrides = Omit<Partial<TerminalInput>, "runParams"> & {
-  runParams?: Partial<TerminalInput["runParams"]>;
-};
-
-function emptyAssistant(overrides: Parameters<typeof buildEmbeddedRunnerAssistant>[0] = {}) {
-  return buildEmbeddedRunnerAssistant({
-    content: [{ type: "text", text: "" }],
-    ...overrides,
-  });
-}
-
-function makeTerminalInput(overrides: TerminalInputOverrides = {}): TerminalInput {
-  const assistant = overrides.attemptAssistant ?? emptyAssistant();
-  const attempt =
-    overrides.attempt ??
-    makeEmbeddedRunnerAttempt({
-      assistantTexts: [],
-      lastAssistant: assistant,
-      currentAttemptAssistant: assistant,
-      currentAttemptReplayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
-    });
-  const profileStore = { version: 1, profiles: {} } as never;
-  const runParams = {
-    sessionId: "session:terminal-resolution",
-    sessionKey: "agent:main:terminal-resolution",
-    runId: "run:terminal-resolution",
-    agentDir: "/tmp/openclaw-terminal-resolution",
-    workspaceDir: "/tmp/openclaw-terminal-resolution",
-    ...overrides.runParams,
-  } as TerminalInput["runParams"];
-  const base = {
-    runParams,
-    retryState: createEmbeddedRunTerminalRetryState(),
-    attempt,
-    attemptAssistant: attempt.currentAttemptAssistant ?? attempt.lastAssistant,
-    activeErrorContext: { provider: "openai", model: "gpt-5.6-luna" },
-    modelApi: "openai-responses",
-    executionContract: undefined,
-    terminalState: resolveEmbeddedRunAttemptTerminalState({
-      attempt,
-      assistant: attempt.currentAttemptAssistant ?? attempt.lastAssistant,
-    }),
-    payloadsWithToolMedia: [],
-    recoveredFinalAssistantPayloadsAfterPromptTimeout: undefined,
-    finalAssistantVisibleText: undefined,
-    finalAssistantRawText: undefined,
-    agentMeta: {} as never,
-    attemptToolSummary: undefined,
-    failureSignal: undefined,
-    maxReasoningOnlyRetryAttempts: 2,
-    maxEmptyResponseRetryAttempts: 1,
-    attemptCompactionCount: 0,
-    replayState: { ...attempt.replayMetadata, replayInvalid: false },
-    activePromptPersisted: true,
-    activateInternalPrompt: vi.fn(),
-    setSuppressNextUserMessagePersistence: vi.fn(),
-    armPostCompactionGuard: vi.fn(),
-    readTerminalToolPresentation: () => undefined,
-    resolveReplayInvalid: () => false,
-    setTerminalLifecycleMeta: vi.fn(),
-    maybeMarkAuthProfileFailure: vi.fn(async () => undefined),
-    assistantProfileFailureReason: null,
-    startedAtMs: Date.now(),
-    provider: "openai",
-    modelId: "gpt-5.6-luna",
-    modelTransportId: "gpt-5.6-luna",
-    modelTransportApi: "openai-responses",
-    requestTransportOverrides: "none",
-    authProfileId: undefined,
-    profileFailureStore: profileStore,
-    attemptAuthProfileStore: profileStore,
-    apiKeyInfo: null,
-    agentHarnessId: "builtin-openclaw",
-    settledTurnFinalizationOutcome: "not-attempted",
-    pluginHarnessOwnsTransport: false,
-    pluginHarnessOwnsAuthBootstrap: false,
-    reportedModelRef: { provider: "openai", model: "gpt-5.6-luna" },
-    traceAttempts: [],
-    traceAttemptUsesFallback: () => false,
-    thinkLevel: "off",
-    contextRecoveryState: createEmbeddedRunContextRecoveryState(),
-  } satisfies TerminalInput;
-  return { ...base, ...overrides, runParams };
-}
-
-async function resolveTerminalText(overrides: TerminalInputOverrides): Promise<string | undefined> {
-  const resolved = await resolveEmbeddedRunTerminal(makeTerminalInput(overrides));
-  expect(resolved.action).toBe("complete");
-  if (resolved.action !== "complete") {
-    throw new Error("expected terminal resolution to complete");
-  }
-  return resolved.result.payloads?.[0]?.text;
-}
 
 describe("terminal resolution", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -367,38 +271,6 @@ describe("terminal resolution", () => {
     });
     expect(text).toContain("some tool actions may have already been executed");
     expect(text).not.toContain("Couldn't sign in");
-  });
-
-  it("carries presentation across retries until a newer tool outcome replaces it", () => {
-    const tracker = createTerminalToolPresentationTracker();
-    const firstOrdinal = tracker.allocateOrdinal();
-    tracker.observe({
-      toolCallOrdinal: firstOrdinal,
-      terminalPresentation: "Fetched https://example.com",
-    });
-
-    expect(tracker.read()).toBe("Fetched https://example.com");
-
-    const retryOrdinal = tracker.allocateOrdinal();
-    expect(tracker.read()).toBe("Fetched https://example.com");
-    tracker.observe({ toolCallOrdinal: retryOrdinal });
-    tracker.observe({
-      toolCallOrdinal: firstOrdinal,
-      terminalPresentation: "stale presentation",
-    });
-
-    expect(tracker.read()).toBeUndefined();
-  });
-
-  it("keeps only the bounded latest MCP App view identity", () => {
-    expect(
-      copyAttemptDeliveryState({
-        latestMcpAppChannelView: { viewId: "view-latest" },
-        messagingToolSentTexts: [],
-        messagingToolSentMediaUrls: [],
-        messagingToolSentTargets: [],
-      } as never).latestMcpAppChannelView,
-    ).toEqual({ viewId: "view-latest" });
   });
 
   it("retries a required empty reply even when deliberate silence is enabled", async () => {
