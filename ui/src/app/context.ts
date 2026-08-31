@@ -19,7 +19,6 @@ import type { NativeNotificationsCapability } from "./native-notifications.ts";
 import type { ApplicationOverlays } from "./overlays-types.ts";
 import type { ApplicationPlacementStartup } from "./session-placement-startup.ts";
 import type { UiSettings } from "./settings.ts";
-import type { ApplicationSkillWorkshopRevisionAdmissions } from "./skill-workshop-revision-admissions.ts";
 import type { ThemeMode, ThemeName } from "./theme.ts";
 import type { WebPushCapability } from "./web-push.ts";
 
@@ -91,6 +90,7 @@ export type ApplicationChatAttachmentHandoff = {
 export type ApplicationContext<TRouteId extends string = string> = {
   readonly basePath: string;
   readonly resourceBasePath: string;
+  readonly lifecycleAbortSignal?: AbortSignal;
   readonly gateway: ApplicationGateway;
   /** App-owned queue for automatic Gateway reconnect bootstrap work. */
   readonly connectionBootstrap: ConnectionBootstrapCoordinator;
@@ -110,7 +110,6 @@ export type ApplicationContext<TRouteId extends string = string> = {
   readonly nativeChatDrafts: NativeChatDrafts;
   readonly nativeNotifications: NativeNotificationsCapability | null;
   readonly webPush: WebPushCapability;
-  readonly skillWorkshopRevisionAdmissions: ApplicationSkillWorkshopRevisionAdmissions;
   readonly chatSubmissions: ApplicationChatSubmissions;
   readonly chatAttachmentHandoff: ApplicationChatAttachmentHandoff;
   readonly navigate: (routeId: TRouteId, options?: ApplicationNavigationOptions) => void;

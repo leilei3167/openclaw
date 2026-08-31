@@ -242,6 +242,8 @@ export function createApplicationOverlays(
       });
     },
   });
+  const runConnectionBootstrap = (key: string, task: () => Promise<unknown>) =>
+    hooks.connectionBootstrap?.run(key, task) ?? task();
 
   const synchronizeGateway = (next: ApplicationGateway["snapshot"]) => {
     const previousClient = activeClient;
@@ -366,31 +368,23 @@ export function createApplicationOverlays(
       devicePairSetupState.devicePairSetupOpen &&
       (operatorAccess.canAdmin || operatorAccess.canPair)
     ) {
-      void (
-        hooks.connectionBootstrap?.run("pairing-pending-count", () =>
-          pairingPendingCount.refresh(),
-        ) ?? pairingPendingCount.refresh()
-      ).catch(() => undefined);
+      void runConnectionBootstrap("pairing-pending-count", () => pairingPendingCount.refresh()).catch(
+        () => undefined,
+      );
     }
     if (connectedSourceChanged) {
       connectedEpoch += 1;
       if (operatorAccess.canReviewApprovals) {
-        void (
-          hooks.connectionBootstrap?.run("approvals", () =>
-            refreshApprovals(client, connectedEpoch, approvalAccessGeneration),
-          ) ?? refreshApprovals(client, connectedEpoch, approvalAccessGeneration)
+        void runConnectionBootstrap("approvals", () =>
+          refreshApprovals(client, connectedEpoch, approvalAccessGeneration),
         ).catch(() => undefined);
       }
-      void (
-        hooks.connectionBootstrap?.run("update-verification", () =>
-          updateVerification.verify(client, connectedEpoch),
-        ) ?? updateVerification.verify(client, connectedEpoch)
+      void runConnectionBootstrap("update-verification", () =>
+        updateVerification.verify(client, connectedEpoch),
       ).catch(() => undefined);
     } else if (accessTransition.reviewChanged && operatorAccess.canReviewApprovals) {
-      void (
-        hooks.connectionBootstrap?.run("approvals", () =>
-          refreshApprovals(client, connectedEpoch, approvalAccessGeneration),
-        ) ?? refreshApprovals(client, connectedEpoch, approvalAccessGeneration)
+      void runConnectionBootstrap("approvals", () =>
+        refreshApprovals(client, connectedEpoch, approvalAccessGeneration),
       ).catch(() => undefined);
     }
   };

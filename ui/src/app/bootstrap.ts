@@ -65,7 +65,6 @@ import {
   saveSettings,
   type UiSettings,
 } from "./settings.ts";
-import { createSkillWorkshopRevisionAdmissions } from "./skill-workshop-revision-admissions.ts";
 import { createStartupLifecycle, type StartupStep } from "./startup-lifecycle.ts";
 import {
   normalizeLegacyTerminalViewLocation,
@@ -315,7 +314,6 @@ export function bootstrapApplication(
   });
   const nativeNotifications = createNativeNotificationsCapability();
   const webPush = createWebPushCapability(gateway, { connectionBootstrap });
-  const skillWorkshopRevisionAdmissions = createSkillWorkshopRevisionAdmissions();
   const chatSubmissions = createChatSubmissions();
   const placementStartup = createApplicationPlacementStartup({
     gateway,
@@ -442,6 +440,7 @@ export function bootstrapApplication(
   const context: ApplicationContext<RouteId> = {
     basePath,
     resourceBasePath,
+    lifecycleAbortSignal: startupLifecycle.signal,
     gateway,
     connectionBootstrap,
     agents,
@@ -460,7 +459,6 @@ export function bootstrapApplication(
     nativeChatDrafts,
     nativeNotifications,
     webPush,
-    skillWorkshopRevisionAdmissions,
     chatSubmissions,
     chatAttachmentHandoff,
     navigate: (routeId, options) => {
@@ -583,7 +581,6 @@ export function bootstrapApplication(
       nativeLinkRouting.dispose();
       nativeNotifications?.dispose();
       webPush.dispose();
-      skillWorkshopRevisionAdmissions.dispose();
       chatSubmissions.clear();
       chatAttachmentHandoff.dispose();
     },
