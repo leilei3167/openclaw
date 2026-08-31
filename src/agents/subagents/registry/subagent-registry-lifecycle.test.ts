@@ -5062,10 +5062,12 @@ describe("requester settle wake trigger", () => {
         completion: { required: false, resultText: "delete-mode findings" },
       });
       const runs = new Map([[entry.runId, entry]]);
-      const settleWake = vi.fn(async (params: { completeBatch: (runIds: readonly string[]) => void }) => {
-        params.completeBatch([entry.runId]);
-        return false;
-      });
+      const settleWake = vi.fn(
+        async (params: { completeBatch: (runIds: readonly string[]) => void }) => {
+          params.completeBatch([entry.runId]);
+          return false;
+        },
+      );
       const runSubagentAnnounceFlow = vi.fn(async () => "delivered" as const);
       const controller = createLifecycleController({
         entry,

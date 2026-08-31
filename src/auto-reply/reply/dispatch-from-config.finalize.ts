@@ -82,7 +82,6 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
   let routedFinalCount = 0;
   let attemptedFinalDelivery = false;
   let acceptedFinal = false;
-  let finalDeliveryFailed = false;
   let sessionWriterDeliveryRevoked = false;
   let channelTransformSuppressedFinal = false;
   const finalDeliveries: Promise<ReplyDispatchDeliveryOutcome>[] = [];

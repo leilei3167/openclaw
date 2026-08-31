@@ -224,7 +224,9 @@ describe("web push Gateway reconciliation", () => {
     } satisfies ConnectionBootstrapCoordinator;
     const harness = gatewayHarness();
     const connection = gatewayClient(Promise.resolve(encodedVapidKey([4, 1, 2, 3])));
-    const capability = createWebPushCapability(harness.gateway, { connectionBootstrap: coordinator });
+    const capability = createWebPushCapability(harness.gateway, {
+      connectionBootstrap: coordinator,
+    });
 
     harness.connect(connection.client);
     await vi.waitFor(() => expect(coordinatorRuns).toEqual(["web-push-reconcile"]));
