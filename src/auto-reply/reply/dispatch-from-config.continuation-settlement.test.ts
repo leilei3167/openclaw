@@ -249,6 +249,46 @@ describe("accepted continuation status delivery", () => {
     expect(settle).toHaveBeenCalledExactlyOnceWith(false);
   });
 
+  it("releases an accepted continuation when session-writer delivery is revoked", async () => {
+    const statusPayload = setReplyPayloadMetadata(
+      { text: "Continuing work; the result will follow." },
+      {
+        sessionWriterDeliveryAuthority: {
+          agentId: "main",
+          expectedLifecycleRevision: "revision-before-replacement",
+          expectedSessionId: "session-1",
+          expectedWriterRunId: "run-before-replacement",
+          sessionKey: "agent:test:session",
+          storePath: "/tmp/mock-sessions.json",
+        },
+      },
+    );
+    sessionStoreMocks.currentEntry = {
+      sessionId: "session-1",
+      lifecycleRevision: "revision-after-replacement",
+      activeWriterRunId: "run-after-replacement",
+    };
+    const settle = vi.fn(async () => {});
+    const dispatcher = createReplyDispatcher({ deliver: vi.fn() });
+
+    await withReplyDispatcher({
+      dispatcher,
+      run: () =>
+        dispatchReplyFromConfig({
+          ctx: createHookCtx(),
+          cfg: emptyConfig,
+          dispatcher,
+          replyResolver: async (_ctx, opts) => {
+            opts?.onPendingContinuation?.({ statusPayload, settle });
+            return statusPayload;
+          },
+        }),
+    });
+
+    expect(settle).toHaveBeenCalledExactlyOnceWith(false);
+    expect(mocks.routeReply).not.toHaveBeenCalled();
+  });
+
   it("clears pending final delivery when abort fires after a successful final send (#89115)", async () => {
     sessionStoreMocks.currentEntry = {
       sessionId: "session-1",
