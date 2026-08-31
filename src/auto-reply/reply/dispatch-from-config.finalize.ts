@@ -68,12 +68,19 @@ export async function finalizeDispatchAndAudit(state: ExecuteDispatchReadyState)
     .find((completion) => completion !== undefined);
   // Final delivery is outside the progress wrappers. Wait until every source-ordered callback
   // has at least started so a delayed tool/reasoning transition cannot appear after the final.
-  if (state.preserveProgressCallbackStartOrder) {
-    await state.progressState.progressCallbackStartTail;
+  try {
+    if (state.preserveProgressCallbackStartOrder) {
+      await state.progressState.progressCallbackStartTail;
+    }
+    // Backstop: silent/streaming-delivered turns end without a visible final
+    // reply; trailing commentary must still land.
+    await state.flushPendingCommentaryProgress();
+  } catch (error) {
+    // Commentary flush precedes the status-specific handoff owner. Release the
+    // child before that pre-queue failure can escape finalization.
+    await pendingContinuationSettlement?.settle(false);
+    throw error;
   }
-  // Backstop: silent/streaming-delivered turns end without a visible final
-  // reply; trailing commentary must still land.
-  await state.flushPendingCommentaryProgress();
   const beforeAgentRunBlocked = replies.some(
     (reply) => getReplyPayloadMetadata(reply)?.beforeAgentRunBlocked === true,
   );

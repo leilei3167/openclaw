@@ -249,6 +249,40 @@ describe("accepted continuation status delivery", () => {
     expect(settle).toHaveBeenCalledExactlyOnceWith(false);
   });
 
+  it("releases an accepted continuation when buffered commentary routing rejects", async () => {
+    sessionStoreMocks.currentEntry = { verboseLevel: "on" };
+    const statusPayload = { text: "Continuing work; the result will follow." };
+    const settle = vi.fn(async () => {});
+    const dispatcher = createReplyDispatcher({ deliver: vi.fn() });
+    const ctx = createHookCtx();
+    Object.assign(ctx, { OriginatingChannel: "discord", OriginatingTo: "user:1" });
+    mocks.routeReply.mockRejectedValueOnce(new Error("commentary delivery unavailable"));
+
+    await expect(
+      withReplyDispatcher({
+        dispatcher,
+        run: () =>
+          dispatchReplyFromConfig({
+            ctx,
+            cfg: emptyConfig,
+            dispatcher,
+            replyOptions: { onItemEvent: vi.fn() },
+            replyResolver: async (_ctx, opts) => {
+              opts?.onPendingContinuation?.({ statusPayload, settle });
+              await opts?.onItemEvent?.({
+                itemId: "commentary-1",
+                kind: "preamble",
+                progressText: "Working on the request.",
+              });
+              return statusPayload;
+            },
+          }),
+      }),
+    ).rejects.toThrow("commentary delivery unavailable");
+
+    expect(settle).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
   it("releases an accepted continuation when session-writer delivery is revoked", async () => {
     const statusPayload = setReplyPayloadMetadata(
       { text: "Continuing work; the result will follow." },

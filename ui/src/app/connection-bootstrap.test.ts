@@ -59,6 +59,33 @@ describe("connection bootstrap coordinator", () => {
     expect(staleStarted).toBe(false);
   });
 
+  it("keeps a new connection's active task deduplicated after the old task finishes", async () => {
+    const coordinator = createConnectionBootstrapCoordinator();
+    coordinator.synchronize({ client: {}, connected: true });
+    const previous = deferred();
+    const current = deferred();
+    const runPrevious = vi.fn(async () => await previous.promise);
+    const runCurrent = vi.fn(async () => await current.promise);
+    const runDuplicate = vi.fn(async () => {});
+    const previousTask = coordinator.run("runtime-config", runPrevious);
+
+    await vi.waitFor(() => expect(runPrevious).toHaveBeenCalledOnce());
+    coordinator.synchronize({ client: {}, connected: true });
+    const currentTask = coordinator.run("runtime-config", runCurrent);
+    await vi.waitFor(() => expect(runCurrent).toHaveBeenCalledOnce());
+
+    previous.resolve();
+    await previousTask;
+    const duplicateTask = coordinator.run("runtime-config", runDuplicate);
+    expect(runDuplicate).not.toHaveBeenCalled();
+
+    current.resolve();
+    await Promise.all([currentTask, duplicateTask]);
+    await coordinator.run("runtime-config", runDuplicate);
+
+    expect(runDuplicate).toHaveBeenCalledOnce();
+  });
+
   it("runs connected bootstrap work queued by an earlier subscription", async () => {
     const coordinator = createConnectionBootstrapCoordinator();
     const hydrate = vi.fn(async () => {});
