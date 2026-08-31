@@ -368,9 +368,9 @@ export function createApplicationOverlays(
       devicePairSetupState.devicePairSetupOpen &&
       (operatorAccess.canAdmin || operatorAccess.canPair)
     ) {
-      void runConnectionBootstrap("pairing-pending-count", () => pairingPendingCount.refresh()).catch(
-        () => undefined,
-      );
+      void runConnectionBootstrap("pairing-pending-count", () =>
+        pairingPendingCount.refresh(),
+      ).catch(() => undefined);
     }
     if (connectedSourceChanged) {
       connectedEpoch += 1;
