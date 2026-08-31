@@ -199,17 +199,6 @@ export function resolveTaskUser(env: GatewayServiceEnv): string | null {
   return username;
 }
 
-export function resolveSchtasksCreateUser(
-  env: GatewayServiceEnv,
-  taskUser: string | null,
-): string | null {
-  // Workgroup tasks stay XML user-scoped, but omit /RU so schtasks binds the caller.
-  if (normalizeLowercaseStringOrEmpty(env.USERDOMAIN) === "workgroup") {
-    return null;
-  }
-  return taskUser;
-}
-
 export function shouldUseHiddenWindowsTaskLauncher(env: GatewayServiceEnv): boolean {
   const value = normalizeLowercaseStringOrEmpty(env.OPENCLAW_WINDOWS_TASK_HIDDEN_LAUNCHER);
   return value === "1" || value === "true" || value === "yes";

@@ -335,8 +335,8 @@ describe("installScheduledTask", () => {
       expectInitialTaskQuery();
       // wscript only accepts UTF-16 LE with BOM or ANSI; UTF-16 keeps CJK paths intact.
       expect(rawLauncher.subarray(0, 2)).toEqual(Buffer.from([0xff, 0xfe]));
-      // `/Create /XML` argv shape: ["/Create", "/F", "/TN", "<name>", "/XML", "<path>", "/RU", "<user>", "/NP"].
-      // The XML payload is what carries the SC, RL, TR, and battery settings now.
+      // XML owns the domain user and InteractiveToken. `/NP` would turn it into
+      // non-interactive S4U, so the command must not override the principal.
       expect(schtasksCalls[1]?.slice(0, 5)).toEqual([
         "/Create",
         "/F",
@@ -344,7 +344,11 @@ describe("installScheduledTask", () => {
         "OpenClaw Gateway",
         "/XML",
       ]);
-      expect(schtasksCalls[1]?.slice(6)).toEqual(["/RU", "WORKSTATION\\alice", "/NP"]);
+      expect(schtasksCalls[1]).not.toContain("/RU");
+      expect(schtasksCalls[1]).not.toContain("/NP");
+      const captured = xmlPayloadCaptures.find((entry) => entry.index === 1);
+      expect(captured?.xml).toContain("<UserId>WORKSTATION\\alice</UserId>");
+      expect(captured?.xml).toContain("<LogonType>InteractiveToken</LogonType>");
       expect(launcher).toContain("WScript.Shell");
       expect(launcher).toContain(scriptPath);
       expect(launcher).toContain(
@@ -434,9 +438,12 @@ describe("installScheduledTask", () => {
         "OpenClaw Custom Gateway",
         "/XML",
       ]);
-      expect(schtasksCalls[1]?.slice(6)).toEqual(["/RU", "WORKSTATION\\alice", "/NP"]);
+      expect(schtasksCalls[1]).not.toContain("/RU");
+      expect(schtasksCalls[1]).not.toContain("/NP");
       const captured = xmlPayloadCaptures.find((entry) => entry.index === 1);
       expect(captured?.xml).toContain("gateway.vbs</Command>");
+      expect(captured?.xml).toContain("<UserId>WORKSTATION\\alice</UserId>");
+      expect(captured?.xml).toContain("<LogonType>InteractiveToken</LogonType>");
       expect(script).toContain('set "OPENCLAW_WINDOWS_TASK_NAME=OpenClaw Custom Gateway"');
       expect(launcher).toContain("WScript.Shell");
       expect(launcher).toContain(
@@ -486,7 +493,7 @@ describe("installScheduledTask", () => {
     });
   });
 
-  it("creates the Scheduled Task via XML with battery start/continue enabled (#59299)", async () => {
+  it("creates an interactive domain Scheduled Task via XML with battery start/continue enabled (#59299)", async () => {
     await withUserProfileDir(async (_tmpDir, env) => {
       schtasksResponses.push(missingTaskResponse);
 
@@ -502,6 +509,8 @@ describe("installScheduledTask", () => {
       const createCall = schtasksCalls[1];
       expect(createCall?.[0]).toBe("/Create");
       expect(createCall).toContain("/XML");
+      expect(createCall).not.toContain("/RU");
+      expect(createCall).not.toContain("/NP");
 
       const captured = xmlPayloadCaptures.find((entry) => entry.index === 1);
       expect(captured).toBeDefined();
@@ -515,6 +524,7 @@ describe("installScheduledTask", () => {
       expect(xml).toContain("<LogonTrigger>");
       expect(xml).toContain("<RunLevel>LeastPrivilege</RunLevel>");
       expect(xml).toContain("<UserId>WORKSTATION\\alice</UserId>");
+      expect(xml).toContain("<LogonType>InteractiveToken</LogonType>");
       expect(xml).toContain("<Exec>");
     });
   });

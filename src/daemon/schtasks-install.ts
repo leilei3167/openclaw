@@ -18,7 +18,6 @@ import {
   encodeWindowsLauncherScript,
   quoteSchtasksArg,
   readScheduledTaskCommand,
-  resolveSchtasksCreateUser,
   resolveStartupEntryPath,
   resolveTaskLauncherScriptPath,
   resolveTaskName,
@@ -240,12 +239,9 @@ async function activateScheduledTask(params: {
   let create: Awaited<ReturnType<typeof execSchtasks>>;
   try {
     const xmlArgs = ["/Create", "/F", "/TN", taskName, "/XML", xmlPath];
-    const createUser = resolveSchtasksCreateUser(params.env, taskUser);
-    create = await execSchtasks(createUser ? [...xmlArgs, "/RU", createUser, "/NP"] : xmlArgs);
-    if (create.code !== 0 && createUser) {
-      // Retry without elevated `/RU` when the account password cannot be stored.
-      create = await execSchtasks(xmlArgs);
-    }
+    // The XML owns UserId and InteractiveToken. `/NP` overrides that principal
+    // with a non-interactive S4U logon, so a successful task never starts here.
+    create = await execSchtasks(xmlArgs);
   } finally {
     await fs.rm(path.dirname(xmlPath), { recursive: true, force: true }).catch(() => {});
   }
