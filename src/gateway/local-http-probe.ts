@@ -120,8 +120,8 @@ export function createConfiguredGatewayLocalProbe(
     }
     if (!tlsFingerprint) {
       tlsFingerprintLoad ??= import("../infra/tls/gateway.js")
-        .then(({ loadGatewayTlsRuntime }) =>
-          loadGatewayTlsRuntime({ ...tlsConfig, autoGenerate: false }),
+        .then(({ loadGatewayTlsServerRuntime }) =>
+          loadGatewayTlsServerRuntime({ ...tlsConfig, autoGenerate: false }),
         )
         .then((gatewayTls) => gatewayTls.fingerprintSha256)
         .catch(() => undefined);
