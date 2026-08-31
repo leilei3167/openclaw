@@ -283,7 +283,7 @@ export function bootstrapApplication(
       password: startup.password ?? "",
     },
   });
-  const sessions = createSessionCapability(gateway, { connectionBootstrap });
+  const sessions = createSessionCapability(gateway);
   const workboard = createWorkboardCapability();
   const runtimeConfig = createRuntimeConfigCapability(gateway);
   const overlays = createApplicationOverlays(gateway, {

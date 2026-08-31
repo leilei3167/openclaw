@@ -1,7 +1,6 @@
 import type { SessionCatalogPullRequestSummary } from "../../../../packages/gateway-protocol/src/schema/sessions-catalog.js";
 import { GatewayRequestError, type GatewayEventFrame } from "../../api/gateway.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
-import type { ConnectionBootstrapCoordinator } from "../../app/connection-bootstrap.ts";
 import { formatUiError } from "../format-error.ts";
 import { createGatewayConnectionLifecycle } from "../gateway-connection-lifecycle.ts";
 import type { SessionCreateOutcome } from "./create.ts";
@@ -84,10 +83,7 @@ function isSessionStateEvent(event: GatewayEventFrame): boolean {
   return event.event === "sessions.changed" || event.event === "session.message";
 }
 
-export function createSessionCapability(
-  gateway: SessionGateway,
-  hooks: { connectionBootstrap?: ConnectionBootstrapCoordinator } = {},
-): SessionCapability {
+export function createSessionCapability(gateway: SessionGateway): SessionCapability {
   let state: SessionState = {
     result: null,
     agentId: null,
@@ -525,9 +521,7 @@ export function createSessionCapability(
           }
         }
       };
-      void (hooks.connectionBootstrap?.run("sessions", hydrate) ?? hydrate()).catch(
-        () => undefined,
-      );
+      void hydrate().catch(() => undefined);
     }
   });
 
