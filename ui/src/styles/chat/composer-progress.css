@@ -841,7 +841,10 @@
   min-width: 0;
   min-height: 0;
   max-height: min(300px, 48dvh);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
   padding: 0 18px 14px 13px;
   border: 0;
   border-radius: 0;

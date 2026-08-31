@@ -4874,8 +4874,8 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
       expect(
         await page
           .locator(".session-progress-card__body")
-          .evaluate((node) => getComputedStyle(node).overflow),
-      ).toBe("hidden");
+          .evaluate((node) => getComputedStyle(node).overflowY),
+      ).toBe("auto");
 
       await list.evaluate((node) => {
         node.scrollTop = node.scrollHeight;
@@ -4970,6 +4970,68 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
           path: path.join(artifactDir, "task-progress-collapsed-with-queue.png"),
         });
       }
+    } finally {
+      await closeBrowserPage(page);
+    }
+  });
+
+  it("keeps tall task progress markdown reachable with an internal body scroll", async () => {
+    const page = await openBrowserPage(980, 700);
+    const rows = Array.from(
+      { length: 18 },
+      (_, index) =>
+        `<tr><td>Gate ${index + 1}</td><td>Detailed state for gate ${index + 1}</td></tr>`,
+    ).join("");
+    try {
+      await page.setContent(`<!doctype html><html><head><style>${readUiCss()}
+        body { margin: 0; padding: 32px; background: var(--bg); }
+        .agent-chat__composer-shell { width: 760px; margin: 0 auto; }
+      </style></head><body>
+        <div class="agent-chat__composer-shell">
+          <div class="agent-chat__progress-float">
+            <details class="session-progress-card session-progress-card--composer" open>
+              <summary class="session-progress-card__summary">
+                <span class="session-progress-card__summary-expanded">
+                  <span class="session-progress-card__summary-title">Task progress</span>
+                  <span class="session-progress-card__heading-actions">9 of 18</span>
+                </span>
+              </summary>
+              <div class="session-progress-card__body">
+                <div class="session-progress-card__markdown sidebar-markdown">
+                  <table><thead><tr><th>Gate</th><th>State</th></tr></thead><tbody>${rows}</tbody></table>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </body></html>`);
+
+      const summary = page.locator(".session-progress-card__summary");
+      const body = page.locator(".session-progress-card__body");
+      const summaryTop = (await summary.boundingBox())?.y;
+      const bodyLayout = await body.evaluate((node) => ({
+        clientHeight: node.clientHeight,
+        overflowY: getComputedStyle(node).overflowY,
+        scrollHeight: node.scrollHeight,
+      }));
+      expect(bodyLayout.overflowY).toBe("auto");
+      expect(bodyLayout.scrollHeight).toBeGreaterThan(bodyLayout.clientHeight);
+
+      await body.evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+      });
+      const scrolled = await body.evaluate((node) => node.scrollTop);
+      const lastRowVisible = await page.locator("tbody tr:last-child").evaluate((node) => {
+        const row = node.getBoundingClientRect();
+        const viewport = node
+          .closest<HTMLElement>(".session-progress-card__body")!
+          .getBoundingClientRect();
+        return row.bottom <= viewport.bottom + 1 && row.top >= viewport.top - 1;
+      });
+      expect(scrolled).toBeGreaterThan(0);
+      expect(lastRowVisible).toBe(true);
+      expect((await summary.boundingBox())?.y).toBeCloseTo(summaryTop ?? 0, 1);
+      expect(await page.evaluate(() => window.scrollY)).toBe(0);
     } finally {
       await closeBrowserPage(page);
     }
