@@ -26,6 +26,7 @@ describe("detectChangedScope Git-owner routing", () => {
     ".github/workflows/mantis-discord-thread-attachment.yml",
     ".github/workflows/mantis-slack-desktop-smoke.yml",
     ".github/workflows/mantis-web-ui-chat-proof.yml",
+    ".github/workflows/mantis-night-clawer-telegram.yml",
     ".github/actions/git-owner/owner.py",
     ".github/actions/ensure-base-commit/action.yml",
     ".github/actions/ensure-base-commit/policy.py",

@@ -2434,7 +2434,7 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
     new RegExp(
       [
         "^\\.github\\/workflows\\/mantis-(?:discord-(?:smoke|status-reactions|",
-        "thread-attachment)|slack-desktop-smoke)\\.yml$",
+        "thread-attachment)|slack-desktop-smoke|night-clawer-telegram)\\.yml$",
       ].join(""),
       "u",
     ),
@@ -2446,7 +2446,7 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
   ],
   [/^\.github\/workflows\/android-release\.yml$/u, [packageAcceptance, workflowGuards]],
   [
-    /^\.github\/(?:actions\/(?:ensure-base-commit|git-owner|publish-generated-pr|mantis-validate-trusted-ref)\/|workflows\/(?:workflow-sanity|qa-profile-evidence|maturity-scorecard|docs-agent|docs-sync-publish|openclaw-performance|linux-app-release|macos-release|npm-placeholder-bootstrap|plugin-clawhub-release|plugin-npm-release|mantis-(?:discord-(?:smoke|status-reactions|thread-attachment)|slack-desktop-smoke|web-ui-chat-proof))\.yml$)/u,
+    /^\.github\/(?:actions\/(?:ensure-base-commit|git-owner|publish-generated-pr|mantis-validate-trusted-ref)\/|workflows\/(?:workflow-sanity|qa-profile-evidence|maturity-scorecard|docs-agent|docs-sync-publish|openclaw-performance|linux-app-release|macos-release|npm-placeholder-bootstrap|plugin-clawhub-release|plugin-npm-release|mantis-(?:discord-(?:smoke|status-reactions|thread-attachment)|slack-desktop-smoke|web-ui-chat-proof|night-clawer-telegram))\.yml$)/u,
     [
       "ci-git-owner",
       "ci-linux-git",
