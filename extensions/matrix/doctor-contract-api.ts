@@ -12,13 +12,7 @@ import {
   requiresExplicitMatrixDefaultAccount,
   resolveMatrixDefaultOrOnlyAccountId,
 } from "./src/account-selection.js";
-import {
-  hasMatrixSyncCacheStateInStore,
-  openMatrixSyncCacheStoreOptions,
-  readLegacyMatrixSyncCacheState,
-  writeMatrixSyncCacheStateToStore,
-  type MatrixSyncCacheRecord,
-} from "./src/matrix/client/file-sync-store.js";
+import type { MatrixSyncCacheRecord } from "./src/matrix/client/file-sync-store.js";
 import {
   hasMatrixStorageMetaStateInStore,
   normalizeMatrixStorageMetadata,
@@ -35,7 +29,6 @@ import {
   type MatrixCredentialStateRecord,
   type MatrixStoredCredentialRecord,
 } from "./src/matrix/credentials-state.js";
-import { migrateLegacyMatrixIdbSnapshot } from "./src/matrix/crypto-snapshot-doctor.js";
 import {
   MATRIX_IDB_SNAPSHOT_FILENAME,
   MATRIX_LEGACY_CRYPTO_MIGRATION_FILENAME,
@@ -164,8 +157,18 @@ async function collectLegacyMatrixStateRoots(
     .toSorted();
 }
 
-async function collectLegacySyncCacheRoots(stateDir: string): Promise<string[]> {
-  return collectLegacyMatrixStateRoots(stateDir, MATRIX_SYNC_CACHE_FILENAME);
+async function* readLegacyMatrixSyncCaches(stateDir: string) {
+  for (const storageRootDir of await collectLegacyMatrixStateRoots(
+    stateDir,
+    MATRIX_SYNC_CACHE_FILENAME,
+  )) {
+    // Only legacy cache files need the SDK-backed store; cold Doctor enumeration does not.
+    const syncCache = await import("./src/matrix/client/file-sync-store.js");
+    const persisted = await syncCache.readLegacyMatrixSyncCacheState(storageRootDir);
+    if (persisted) {
+      yield { storageRootDir, persisted, syncCache };
+    }
+  }
 }
 
 async function readLegacyMatrixStorageMetadata(
@@ -505,11 +508,7 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
     label: "Matrix sync cache",
     async detectLegacyState(params) {
       const previews: string[] = [];
-      for (const storageRootDir of await collectLegacySyncCacheRoots(params.stateDir)) {
-        const persisted = await readLegacyMatrixSyncCacheState(storageRootDir);
-        if (!persisted) {
-          continue;
-        }
+      for await (const { storageRootDir } of readLegacyMatrixSyncCaches(params.stateDir)) {
         previews.push(`Matrix sync cache JSON can migrate to SQLite: ${storageRootDir}`);
       }
       return previews.length > 0 ? { preview: previews } : null;
@@ -518,15 +517,13 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
       const changes: string[] = [];
       const warnings: string[] = [];
       const notices: string[] = [];
-      for (const storageRootDir of await collectLegacySyncCacheRoots(params.stateDir)) {
-        const persisted = await readLegacyMatrixSyncCacheState(storageRootDir);
-        if (!persisted) {
-          continue;
-        }
+      for await (const { storageRootDir, persisted, syncCache } of readLegacyMatrixSyncCaches(
+        params.stateDir,
+      )) {
         const store = params.context.openPluginStateKeyedStore<MatrixSyncCacheRecord>(
-          openMatrixSyncCacheStoreOptions(storageRootDir),
+          syncCache.openMatrixSyncCacheStoreOptions(storageRootDir),
         );
-        if (await hasMatrixSyncCacheStateInStore({ storageRootDir, store })) {
+        if (await syncCache.hasMatrixSyncCacheStateInStore({ storageRootDir, store })) {
           await archiveLegacySyncCache({
             storageRootDir,
             changes,
@@ -536,7 +533,7 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
           });
           continue;
         }
-        await writeMatrixSyncCacheStateToStore({
+        await syncCache.writeMatrixSyncCacheStateToStore({
           storageRootDir,
           payload: persisted,
           store,
@@ -674,6 +671,8 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
         MATRIX_IDB_SNAPSHOT_FILENAME,
         { includeMatrixRoot: true },
       )) {
+        const { migrateLegacyMatrixIdbSnapshot } =
+          await import("./src/matrix/crypto-snapshot-doctor.js");
         await migrateLegacyMatrixIdbSnapshot({
           storageRootDir,
           context: params.context,
