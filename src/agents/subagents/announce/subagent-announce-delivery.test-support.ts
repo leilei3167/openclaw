@@ -15,6 +15,7 @@ type DeliveryDeps = Omit<
     requesterAgentId?: string,
   ) => {
     sessionId?: string;
+    runId?: string;
     isActive: boolean;
   };
   queueEmbeddedAgentMessageWithOutcome: (

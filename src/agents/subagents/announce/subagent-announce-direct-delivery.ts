@@ -57,6 +57,7 @@ import {
 import {
   dispatchSubagentAnnounceAgent,
   getSubagentAnnounceRuntimeConfig,
+  isActiveEmbeddedRunId,
   isSubagentRequesterSessionAbandoned,
   loadRequesterSessionEntry,
   resolveExternalBestEffortDeliveryTarget,
@@ -297,10 +298,20 @@ export async function sendSubagentAnnounceDirectly(params: {
         directOrigin?.channel,
       sessionEntry: requesterEntry,
     });
+    // Same-id pending-handoff fence: a retryable in_flight/admission replay can
+    // leave the original Gateway handoff active under our idempotency key. Do
+    // not steer/enqueue into that run (self-steer); rejoin via same-key replay.
+    const pendingHandoffRunId = params.directIdempotencyKey?.trim() || undefined;
+    const activeRunIsPendingHandoff = Boolean(
+      pendingHandoffRunId &&
+      (requesterActivity.runId === pendingHandoffRunId ||
+        isActiveEmbeddedRunId(pendingHandoffRunId)),
+    );
     if (
       params.expectsCompletionMessage &&
       requesterActivity.sessionId &&
-      requesterActivity.isActive
+      requesterActivity.isActive &&
+      !activeRunIsPendingHandoff
     ) {
       const wakeOptions: EmbeddedAgentQueueMessageOptions = {
         deliveryTimeoutMs: announceTimeoutMs,
