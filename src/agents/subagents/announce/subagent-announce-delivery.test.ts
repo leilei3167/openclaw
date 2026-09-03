@@ -3907,25 +3907,67 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("preserves pending completion announce delivery without media fallback", async () => {
+  it("keeps an in-flight completion retryable until its terminal reply without fallback", async () => {
+    const directIdempotencyKey = "announce-channel-completion-pending";
     const callGateway = createGatewayMock({
-      runId: "subagent:child:ok",
-      status: "accepted",
-      acceptedAt: Date.now(),
+      runId: directIdempotencyKey,
+      status: "in_flight",
+      admissionPending: true,
     });
     const sendMessage = createSendMessageMock();
-    const result = await deliverSlackChannelAnnouncement({
+    const queueEmbeddedAgentMessageWithOutcome = createQueueOutcomeMock(true);
+    const params = {
       callGateway,
       sendMessage,
-      directIdempotencyKey: "announce-channel-completion-pending",
+      queueEmbeddedAgentMessageWithOutcome,
+      directIdempotencyKey,
       internalEvents: taskCompletionEvents({
         childSessionId: "child-session-id",
         taskLabel: "channel completion smoke",
       }),
-    });
+    };
+    const pending = await deliverSlackChannelAnnouncement(params);
 
-    expectDeliveryPath(result, "direct");
+    expect(pending).toMatchObject({
+      delivered: false,
+      path: "direct",
+      reason: "completion_handoff_pending",
+      disposition: "retryable",
+      terminal: true,
+      phases: [
+        {
+          phase: "direct-primary",
+          delivered: false,
+          path: "direct",
+          reason: "completion_handoff_pending",
+        },
+      ],
+    });
+    expect(pending.requesterVisibleFinalDelivered).toBeUndefined();
     expect(callGateway).toHaveBeenCalledTimes(1);
+    expect(queueEmbeddedAgentMessageWithOutcome).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    vi.mocked(callGateway).mockResolvedValue({
+      runId: directIdempotencyKey,
+      status: "ok",
+      result: {
+        payloads: [{ text: "The delegated task is complete." }],
+        deliveryStatus: sentDeliveryStatus,
+      },
+    });
+    const delivered = await deliverSlackChannelAnnouncement(params);
+
+    expect(delivered).toMatchObject({
+      delivered: true,
+      path: "direct",
+      requesterVisibleFinalDelivered: true,
+    });
+    expect(vi.mocked(callGateway).mock.calls.map(([call]) => call.params?.idempotencyKey)).toEqual([
+      directIdempotencyKey,
+      directIdempotencyKey,
+    ]);
+    expect(queueEmbeddedAgentMessageWithOutcome).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

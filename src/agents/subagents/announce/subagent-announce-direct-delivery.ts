@@ -477,9 +477,15 @@ export async function sendSubagentAnnounceDirectly(params: {
 
     const directAnnounceStillPending = isGatewayAgentRunPending(directAnnounceResponse);
     if (directAnnounceStillPending) {
+      // Idempotent replay can return in_flight / admissionPending while the
+      // original handoff is still running. Do not credit delivery yet; keep
+      // custody retryable and suppress same-attempt media fallback.
       return {
-        delivered: true,
+        delivered: false,
         path: "direct",
+        reason: "completion_handoff_pending",
+        disposition: "retryable",
+        terminal: true,
       };
     }
 
