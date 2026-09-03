@@ -3963,10 +3963,13 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       path: "direct",
       requesterVisibleFinalDelivered: true,
     });
-    expect(vi.mocked(callGateway).mock.calls.map(([call]) => call.params?.idempotencyKey)).toEqual([
-      directIdempotencyKey,
-      directIdempotencyKey,
-    ]);
+    expect(
+      vi
+        .mocked(callGateway)
+        .mock.calls.map(
+          (call) => (call[0] as { params?: Record<string, unknown> })?.params?.idempotencyKey,
+        ),
+    ).toEqual([directIdempotencyKey, directIdempotencyKey]);
     expect(queueEmbeddedAgentMessageWithOutcome).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
   });
