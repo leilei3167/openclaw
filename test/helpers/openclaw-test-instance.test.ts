@@ -1147,16 +1147,40 @@ describe("openclaw test instance", () => {
 
   it.runIf(process.platform !== "win32")(
     "reaps terminal children with inherited stdio before starting a new gateway",
-    async () => {
+    async ({ signal: testSignal }) => {
       const stopTimeoutMs = 100;
+      const control = await createGatewayControl();
       const { instance, readAttempts, tracePath } = await createFakeGateway(
         "terminal-drain,ready",
         300,
         stopTimeoutMs,
+        control,
       );
-
+      // Bootstrap is not the teardown deadline. Start policy time at native exit,
+      // keeping the real inherited-pipe drain and failed restart budgets intact.
+      testSignal.throwIfAborted();
+      const now = Date.now.bind(Date);
+      const fixtureTime = now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureTime);
+      const restoreClock = () => clock.mockRestore();
+      testSignal.addEventListener("abort", restoreClock, { once: true });
+      const exited = createDeferred<{ code: number | null; signal: NodeJS.Signals | null }>();
+      control.observers.onLaunch = () => {
+        if (control.launches.length !== 1) {
+          return;
+        }
+        const leader = instance.child;
+        if (!leader) {
+          exited.reject(new Error("fixture launched without a process owner"));
+          return;
+        }
+        leader.once("exit", (code, signal) => exited.resolve({ code, signal }));
+      };
       const startup = trackOperation(instance.startGateway());
       try {
+        expect(await Promise.race([exited.promise, startup])).toEqual({ code: 7, signal: null });
+        const drainStartedAt = now();
+        clock.mockImplementation(() => fixtureTime + now() - drainStartedAt);
         const startupError = await startup.catch((error: unknown) => error);
         expect(startupError).toBeInstanceOf(Error);
         expect((startupError as Error).message).toContain(
@@ -1193,7 +1217,9 @@ describe("openclaw test instance", () => {
         );
         expect(firstChild.stdout.closed).toBe(true);
         expect(firstChild.stderr.closed).toBe(true);
+        clock.mockReturnValue(Date.now());
         await trackOperation(instance.startGateway());
+        restoreClock();
 
         const attempts = await readAttempts();
         expect(attempts).toHaveLength(2);
@@ -1204,6 +1230,8 @@ describe("openclaw test instance", () => {
         expect(isProcessAlive(attempts[1]?.pid as number)).toBe(false);
         await expect.poll(() => isProcessAlive(drainingPid), { timeout: 500 }).toBe(false);
       } finally {
+        restoreClock();
+        testSignal.removeEventListener("abort", restoreClock);
         await fs.writeFile(`${tracePath}.draining-release`, "");
         await Promise.allSettled([startup]);
       }
@@ -1269,10 +1297,16 @@ describe("openclaw test instance", () => {
     { label: "joined closure", taskkillStatus: 0, closePipes: true, stopped: true },
     { label: "held pipe", taskkillStatus: 0, closePipes: false, stopped: false },
     { label: "unverified tree", taskkillStatus: 1, closePipes: true, stopped: false },
+    { label: "unverified exited leader", taskkillStatus: 1, closePipes: true, stopped: false },
+    { label: "taskkill timeout", taskkillStatus: 1, closePipes: true, stopped: false },
+    { label: "taskkill exception", taskkillStatus: 1, closePipes: true, stopped: false },
   ])("observes Windows $label after blocking termination", async (scenario) => {
     const stdout = new PassThrough();
     const stderr = new PassThrough();
-    const processState = createGatewayProcessState();
+    const stopLog = testing.createBoundedStringLog();
+    const exitedLeader = scenario.label === "unverified exited leader";
+    const heldPipe = scenario.label === "held pipe";
+    const processState = createGatewayProcessState({ exitCode: exitedLeader ? 7 : null });
     // SAFETY: The stub supplies every process and pipe member consumed by the stopper.
     const child = Object.assign(processState, {
       pid: 12345,
@@ -1291,7 +1325,8 @@ describe("openclaw test instance", () => {
       if (!scheduled) {
         scheduled = true;
         setImmediate(() => {
-          processState.exitCode = 0;
+          processState.exitCode = heldPipe ? null : 0;
+          processState.signalCode = heldPipe ? "SIGTERM" : null;
           stdout.destroy();
           if (scenario.closePipes) {
             stderr.destroy();
@@ -1299,21 +1334,75 @@ describe("openclaw test instance", () => {
           observed.resolve();
         });
       }
-      return { status: scenario.taskkillStatus };
+      if (scenario.label === "taskkill exception") {
+        throw Object.assign(new Error("private exception text must not be logged"), {
+          code: "EACCES",
+        });
+      }
+      if (scenario.label === "taskkill timeout" && runTaskkill.mock.calls.length === 2) {
+        return {
+          status: null,
+          signal: "SIGKILL" as const,
+          error: Object.assign(new Error("private timeout text must not be logged"), {
+            code: "ETIMEDOUT",
+          }),
+        };
+      }
+      return { status: scenario.taskkillStatus, signal: null };
     });
     try {
-      const stopped = await testing.stopGatewayProcess(child, Date.now() + 500, 250, {
-        platform: "win32",
-        runTaskkill,
-      });
+      const stopped = await testing.stopGatewayProcess(
+        child,
+        Date.now() + 500,
+        250,
+        { platform: "win32", runTaskkill },
+        stopLog,
+      );
       expect(stopped).toBe(scenario.stopped);
-      expect(runTaskkill).toHaveBeenCalledTimes(scenario.taskkillStatus === 0 ? 1 : 2);
+      const threw = scenario.label === "taskkill exception";
+      expect(runTaskkill).toHaveBeenCalledTimes(scenario.taskkillStatus === 0 || threw ? 1 : 2);
       if (!scenario.closePipes) {
         expect(stderr.closed).toBe(false);
       }
       if (stopped) {
         expect(child.exitCode).toBe(0);
         expect(stdout.closed && stderr.closed).toBe(true);
+      }
+      expect(stopLog).toHaveLength(stopped ? 0 : 1);
+      if (!stopped) {
+        const prefix = "[openclaw-test-instance] Windows shutdown ";
+        expect(stopLog[0]?.startsWith(prefix)).toBe(true);
+        const diagnostic: { taskkill: Array<{ elapsedMs: number }> } = JSON.parse(
+          stopLog[0]!.slice(prefix.length),
+        );
+        const attempt = { force: false, elapsedMs: expect.any(Number) };
+        const taskkill: Record<string, unknown>[] = threw
+          ? [{ ...attempt, threw: true, errorCode: "EACCES" }]
+          : [{ ...attempt, status: scenario.taskkillStatus, signal: null }];
+        if (!heldPipe && !threw) {
+          taskkill.push({
+            ...attempt,
+            force: true,
+            ...(scenario.label === "taskkill timeout"
+              ? { status: null, signal: "SIGKILL", errorCode: "ETIMEDOUT" }
+              : { status: 1, signal: null }),
+          });
+        }
+        expect(diagnostic).toEqual({
+          reason: threw ? "exception" : heldPipe ? "close-incomplete" : "termination-indeterminate",
+          pid: 12345,
+          exitCode: exitedLeader ? 7 : null,
+          signalCode: heldPipe ? "SIGTERM" : null,
+          stdoutClosed: heldPipe,
+          stderrClosed: false,
+          elapsedMs: expect.any(Number),
+          taskkill,
+          ...(threw ? { errorCode: "EACCES" } : {}),
+        });
+        for (const entry of diagnostic.taskkill) {
+          expect(entry.elapsedMs).toBeGreaterThanOrEqual(1_000);
+        }
+        expect(Buffer.byteLength(stopLog[0]!)).toBeLessThan(1_024);
       }
     } finally {
       if (scheduled) {

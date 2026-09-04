@@ -6,6 +6,7 @@ import { completionRequiresMessageToolDelivery } from "../../../auto-reply/reply
 import { stringifyRouteThreadId } from "../../../plugin-sdk/channel-route.js";
 import { defaultRuntime } from "../../../runtime.js";
 import {
+  INTERNAL_PROVENANCE_SOURCE_CHANNEL,
   isAgentMediatedCompletionSourceTool,
   shouldPreserveUserFacingSessionStateForInputProvenance,
 } from "../../../sessions/input-provenance.js";
@@ -58,7 +59,7 @@ import {
   dispatchSubagentAnnounceAgent,
   getSubagentAnnounceRuntimeConfig,
   isActiveEmbeddedRunId,
-  isSubagentRequesterSessionAbandoned,
+  resolveSubagentRequesterSessionAbandonment,
   loadRequesterSessionEntry,
   resolveExternalBestEffortDeliveryTarget,
   resolveQueueSettings,
@@ -143,7 +144,6 @@ export async function sendSubagentAnnounceDirectly(params: {
   directOrigin?: DeliveryContext;
   requesterSessionOrigin?: DeliveryContext;
   sourceSessionKey?: string;
-  sourceChannel?: string;
   sourceTool?: string;
   isSourceSessionEffectsAllowed?: () => boolean;
   isCompletionOwnedByRequesterYield?: () => boolean;
@@ -243,15 +243,27 @@ export async function sendSubagentAnnounceDirectly(params: {
       params.targetRequesterSessionKey,
       params.requesterAgentId,
     );
-    if (
-      params.expectsCompletionMessage &&
-      isSubagentRequesterSessionAbandoned(canonicalRequesterSessionKey, requesterActivity.sessionId)
-    ) {
+    const requesterAbandonment = params.expectsCompletionMessage
+      ? resolveSubagentRequesterSessionAbandonment(
+          canonicalRequesterSessionKey,
+          requesterActivity.sessionId,
+        )
+      : undefined;
+    if (requesterAbandonment === "timeout") {
       return {
         delivered: false,
         path: "none",
         reason: "requester_abandoned",
         error: "requester session abandoned after timeout",
+      };
+    }
+    if (requesterAbandonment === "recovering_timeout") {
+      return {
+        delivered: false,
+        path: "none",
+        reason: "completion_handoff_pending",
+        error: "requester timeout recovery is still settling",
+        disposition: "retryable",
       };
     }
     const isCompletionDeliveryAllowed = () =>
@@ -405,7 +417,7 @@ export async function sendSubagentAnnounceDirectly(params: {
       inputProvenance: {
         kind: "inter_session",
         sourceSessionKey: params.sourceSessionKey,
-        sourceChannel: params.sourceChannel ?? INTERNAL_MESSAGE_CHANNEL,
+        sourceChannel: INTERNAL_PROVENANCE_SOURCE_CHANNEL,
         sourceTool: params.sourceTool ?? "subagent_announce",
       },
       ...(completionSourceReplyDeliveryMode

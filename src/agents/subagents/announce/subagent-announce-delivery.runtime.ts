@@ -28,9 +28,9 @@ import {
   formatEmbeddedAgentQueueFailureSummary,
   isActiveEmbeddedRunId,
   isEmbeddedAgentRunActive,
-  isEmbeddedRunAbandoned,
   queueEmbeddedAgentMessageWithOutcomeAsync,
   resolveActiveEmbeddedRunOwner,
+  resolveEmbeddedRunAbandonment,
   type EmbeddedAgentQueueMessageOutcome,
 } from "../../embedded-agent-runner/runs.js";
 import { dispatchGatewayMethodInProcess } from "./subagent-announce.runtime.js";
@@ -59,7 +59,10 @@ export type SubagentAnnounceDeliveryDeps = {
     runId?: string;
     isActive: boolean;
   };
-  isRequesterSessionAbandoned: (requesterSessionKey: string, sessionId?: string) => boolean;
+  resolveRequesterSessionAbandonment: (
+    requesterSessionKey: string,
+    sessionId?: string,
+  ) => ReturnType<typeof resolveEmbeddedRunAbandonment>;
   loadSessionEntry: typeof loadSessionEntry;
   loadRequesterSessionEntry: typeof loadRequesterSessionEntry;
   queueEmbeddedAgentMessageWithOutcome: (
@@ -163,8 +166,8 @@ const defaultSubagentAnnounceDeliveryDeps: SubagentAnnounceDeliveryDeps = {
       isActive: Boolean(sessionId && isEmbeddedAgentRunActive(sessionId)),
     };
   },
-  isRequesterSessionAbandoned: (requesterSessionKey, sessionId) =>
-    isEmbeddedRunAbandoned({ sessionKey: requesterSessionKey, sessionId }),
+  resolveRequesterSessionAbandonment: (requesterSessionKey, sessionId) =>
+    resolveEmbeddedRunAbandonment({ sessionKey: requesterSessionKey, sessionId }),
   loadSessionEntry: (...args) => loadSessionEntry(...args),
   loadRequesterSessionEntry: loadDefaultRequesterSessionEntry,
   queueEmbeddedAgentMessageWithOutcome: (...args) =>
@@ -215,11 +218,14 @@ export function getSubagentRequesterSessionActivity(
   );
 }
 
-export function isSubagentRequesterSessionAbandoned(
+export function resolveSubagentRequesterSessionAbandonment(
   requesterSessionKey: string,
   sessionId?: string,
 ) {
-  return subagentAnnounceDeliveryDeps.isRequesterSessionAbandoned(requesterSessionKey, sessionId);
+  return subagentAnnounceDeliveryDeps.resolveRequesterSessionAbandonment(
+    requesterSessionKey,
+    sessionId,
+  );
 }
 
 export function loadRequesterSessionEntry(
