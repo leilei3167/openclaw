@@ -72,6 +72,44 @@ import {
 } from "./subagent-announce-origin.js";
 import { resolveRequesterStoreKey } from "./subagent-requester-store-key.js";
 
+/** Idempotency keys whose Gateway handoff already accepted (in_flight / pending).
+ * Retained so a later retry joins that handoff instead of steering into a
+ * successor requester run after the original handle settles. */
+const retainedCompletionHandoffKeys = new Set<string>();
+
+function normalizeCompletionHandoffKey(key: string | undefined): string | undefined {
+  const normalized = key?.trim();
+  return normalized || undefined;
+}
+
+function retainCompletionHandoffKey(key: string | undefined): void {
+  const normalized = normalizeCompletionHandoffKey(key);
+  if (normalized) {
+    retainedCompletionHandoffKeys.add(normalized);
+  }
+}
+
+function releaseCompletionHandoffKey(key: string | undefined): void {
+  const normalized = normalizeCompletionHandoffKey(key);
+  if (normalized) {
+    retainedCompletionHandoffKeys.delete(normalized);
+  }
+}
+
+export function clearRetainedCompletionHandoffKeysForTest(): void {
+  retainedCompletionHandoffKeys.clear();
+}
+
+function shouldJoinOriginalCompletionHandoff(key: string | undefined): boolean {
+  const normalized = normalizeCompletionHandoffKey(key);
+  if (!normalized) {
+    return false;
+  }
+  // Prefer Gateway replay whenever we already own a pending handoff for this
+  // key, or the original run is still the active embedded handle.
+  return retainedCompletionHandoffKeys.has(normalized) || isActiveEmbeddedRunId(normalized);
+}
+
 async function runAnnounceAgentCall(params: {
   agentParams: Record<string, unknown>;
   delegatedToolPolicyHandoff?: SubagentCompletionToolHandoffRegistration;
@@ -310,20 +348,21 @@ export async function sendSubagentAnnounceDirectly(params: {
         directOrigin?.channel,
       sessionEntry: requesterEntry,
     });
-    // Same-id pending-handoff fence: a retryable in_flight/admission replay can
-    // leave the original Gateway handoff active under our idempotency key. Do
-    // not steer/enqueue into that run (self-steer); rejoin via same-key replay.
-    const pendingHandoffRunId = params.directIdempotencyKey?.trim() || undefined;
-    const activeRunIsPendingHandoff = Boolean(
+    // Prefer joining the original Gateway handoff (same idempotency key) over
+    // steering into whatever requester run is active. A prior in_flight retains
+    // ownership even after that handle settles and a successor run becomes
+    // active; first-attempt steering still applies when nothing is retained.
+    const pendingHandoffRunId = normalizeCompletionHandoffKey(params.directIdempotencyKey);
+    const joinOriginalHandoff = Boolean(
       pendingHandoffRunId &&
       (requesterActivity.runId === pendingHandoffRunId ||
-        isActiveEmbeddedRunId(pendingHandoffRunId)),
+        shouldJoinOriginalCompletionHandoff(pendingHandoffRunId)),
     );
     if (
       params.expectsCompletionMessage &&
       requesterActivity.sessionId &&
       requesterActivity.isActive &&
-      !activeRunIsPendingHandoff
+      !joinOriginalHandoff
     ) {
       const wakeOptions: EmbeddedAgentQueueMessageOptions = {
         deliveryTimeoutMs: announceTimeoutMs,
@@ -502,7 +541,10 @@ export async function sendSubagentAnnounceDirectly(params: {
     if (directAnnounceStillPending) {
       // Idempotent replay can return in_flight / admissionPending while the
       // original handoff is still running. Do not credit delivery yet; keep
-      // custody retryable and suppress same-attempt media fallback.
+      // custody retryable and suppress same-attempt media fallback. Retain the
+      // key so a later retry rejoins this handoff instead of steering into a
+      // successor requester run after settlement.
+      retainCompletionHandoffKey(params.directIdempotencyKey);
       return {
         delivered: false,
         path: "direct",
@@ -511,6 +553,10 @@ export async function sendSubagentAnnounceDirectly(params: {
         terminal: true,
       };
     }
+
+    // Gateway produced a terminal (non-pending) result for this key — release
+    // retained ownership so later unrelated turns can steer normally.
+    releaseCompletionHandoffKey(params.directIdempotencyKey);
 
     const directAnnounceResult = getGatewayAgentResult(directAnnounceResponse);
     const hasFinalMessagingToolDelivery = Boolean(
