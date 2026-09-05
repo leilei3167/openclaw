@@ -7,7 +7,6 @@ import { clearSubagentPendingDelivery } from "../registry/subagent-registry-life
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import {
   clearRetainedCompletionHandoffKeysForTest,
-  hasRetainedCompletionHandoffKeyForTest,
   releaseAnnounceCompletionHandoffForChildRun,
   retainCompletionHandoffKey,
   settleCompletionHandoffRetention,
@@ -35,7 +34,7 @@ describe("completion handoff retention lifecycle", () => {
 
   it("preserves retention across retryable pending attempts", () => {
     retainCompletionHandoffKey(handoffKey);
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(true);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(true);
     expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(true);
 
     settleCompletionHandoffRetention(handoffKey, {
@@ -46,7 +45,7 @@ describe("completion handoff retention lifecycle", () => {
       terminal: true,
     });
 
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(true);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(true);
     expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(true);
   });
 
@@ -58,14 +57,14 @@ describe("completion handoff retention lifecycle", () => {
       reason: "requester_abandoned",
       error: "requester session abandoned after timeout",
     });
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(false);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(false);
 
     retainCompletionHandoffKey(handoffKey);
     settleCompletionHandoffRetention(handoffKey, {
       delivered: true,
       path: "direct",
     });
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(false);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(false);
 
     retainCompletionHandoffKey(handoffKey);
     settleCompletionHandoffRetention(handoffKey, {
@@ -74,15 +73,15 @@ describe("completion handoff retention lifecycle", () => {
       disposition: "permanent_failure",
       error: "hard fail",
     });
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(false);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(false);
   });
 
   it("releases retention when announce cleanup retires a child run", () => {
     retainCompletionHandoffKey(handoffKey);
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(true);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(true);
 
     releaseAnnounceCompletionHandoffForChildRun({ childSessionKey, childRunId });
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(false);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(false);
 
     retainCompletionHandoffKey(handoffKey);
     const entry = {
@@ -91,6 +90,6 @@ describe("completion handoff retention lifecycle", () => {
       delivery: { status: "pending" },
     } as unknown as SubagentRunRecord;
     clearSubagentPendingDelivery(entry);
-    expect(hasRetainedCompletionHandoffKeyForTest(handoffKey)).toBe(false);
+    expect(shouldJoinOriginalCompletionHandoff(handoffKey)).toBe(false);
   });
 });

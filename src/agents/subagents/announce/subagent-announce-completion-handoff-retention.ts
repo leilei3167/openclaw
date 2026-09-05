@@ -69,11 +69,6 @@ export function clearRetainedCompletionHandoffKeysForTest(): void {
   retainedCompletionHandoffKeys.clear();
 }
 
-export function hasRetainedCompletionHandoffKeyForTest(key: string | undefined): boolean {
-  const normalized = normalizeCompletionHandoffKey(key);
-  return Boolean(normalized && retainedCompletionHandoffKeys.has(normalized));
-}
-
 export function shouldJoinOriginalCompletionHandoff(key: string | undefined): boolean {
   const normalized = normalizeCompletionHandoffKey(key);
   if (!normalized) {
