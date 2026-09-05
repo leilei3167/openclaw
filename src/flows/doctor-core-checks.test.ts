@@ -18,11 +18,13 @@ import type { HealthCheck, HealthFinding, HealthRepairEffect } from "./health-ch
 const mocks = vi.hoisted(() => ({
   loadModelCatalog: vi.fn(async () => []),
   detectExtraGatewayServiceIssues: vi.fn(async (): Promise<readonly { label: string }[]> => []),
-  extraGatewayServiceToHealthFinding: vi.fn((service: { label: string }): HealthFinding => ({
-    checkId: "core/doctor/gateway-services/extra",
-    severity: "warning",
-    message: service.label,
-  })),
+  extraGatewayServiceToHealthFinding: vi.fn(
+    (service: { label: string }): HealthFinding => ({
+      checkId: "core/doctor/gateway-services/extra",
+      severity: "warning",
+      message: service.label,
+    }),
+  ),
   extraGatewayServiceToRepairEffects: vi.fn((): readonly HealthRepairEffect[] => []),
   callGateway: vi.fn(),
   collectClawStateHealthFindings: vi.fn(
@@ -1038,6 +1040,50 @@ describe("CORE_HEALTH_CHECKS", () => {
     );
     expect(findings).not.toContainEqual(
       expect.objectContaining({ target: "groq/llama-3.3-70b-versatile" }),
+    );
+  });
+
+  it("accepts static google catalog ids while still warning on unknown google ids", async () => {
+    const check = getCheck(createCoreHealthChecks(), "core/doctor/model-references");
+
+    const findings = await check.detect({
+      mode: "doctor",
+      runtime,
+      cfg: {
+        agents: {
+          defaults: {
+            model: {
+              primary: "google/gemini-2.5-flash",
+              fallbacks: [
+                "google/gemini-3.5-flash",
+                "google/gemini-3.7-flash",
+                "google/gemini-3.1-flash-lite",
+                "google/gemini-3.1-pro-preview",
+                "google/gemini-3.8-flash",
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    for (const known of [
+      "google/gemini-2.5-flash",
+      "google/gemini-3.5-flash",
+      "google/gemini-3.7-flash",
+      "google/gemini-3.1-flash-lite",
+      "google/gemini-3.1-pro-preview",
+    ]) {
+      expect(findings).not.toContainEqual(expect.objectContaining({ target: known }));
+    }
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        severity: "info",
+        target: "google/gemini-3.8-flash",
+        message:
+          'Configured model "google/gemini-3.8-flash" uses a known provider but is not in the local model catalog. It may be newly released or self-hosted.',
+      }),
     );
   });
 });

@@ -30,6 +30,17 @@ type GoogleManifest = {
     >;
   };
   modelCatalog?: {
+    providers?: Record<
+      string,
+      {
+        baseUrl?: string;
+        api?: string;
+        models?: Array<{
+          id?: string;
+          name?: string;
+        }>;
+      }
+    >;
     suppressions?: Array<{
       provider?: string;
       model?: string;
@@ -144,6 +155,31 @@ describe("google manifest model catalog", () => {
         expect(suppressionRefs).toContain(`${provider}/${model}`);
       }
     }
+  });
+
+  it("mirrors GOOGLE_GEMINI_TEXT_MODEL_ROWS into modelCatalog.providers for doctor", () => {
+    const manifest = loadManifest();
+    const staticIds = [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.5-flash-lite",
+      "gemini-3.5-flash",
+      "gemini-3.6-flash",
+      "gemini-3.7-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-pro-preview",
+      "gemini-3.1-flash-lite",
+      "gemini-3-flash-preview",
+    ];
+
+    for (const provider of ["google", "google-vertex", "google-gemini-cli"] as const) {
+      const models = manifest.modelCatalog?.providers?.[provider]?.models ?? [];
+      const ids = models.map((model) => model.id);
+      expect(ids).toEqual(staticIds);
+    }
+
+    expect(manifest.modelCatalog?.providers?.google?.api).toBe("google-generative-ai");
+    expect(manifest.modelCatalog?.providers?.["google-vertex"]?.api).toBe("google-vertex");
   });
 
   it("does not suppress still-callable Google replacement models", () => {
