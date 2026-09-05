@@ -5125,6 +5125,13 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
   });
 
   const deliveredRequesterFinal = { delivered: true, path: "direct" } as const;
+  const pendingRequesterHandoff = {
+    delivered: false,
+    path: "direct",
+    reason: "completion_handoff_pending",
+    disposition: "retryable",
+    terminal: true,
+  } as const;
   const missingRequesterFinal = {
     delivered: false,
     path: "direct",
@@ -5166,7 +5173,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       routes: requesterSettleRoutes,
       response: { status },
       requireVisibleReply: true,
-      expected: deliveredRequesterFinal,
+      expected: pendingRequesterHandoff,
     })),
     {
       name: "does not record a canceled partial answer as a visible final",

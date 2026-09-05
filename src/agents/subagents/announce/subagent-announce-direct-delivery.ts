@@ -47,6 +47,12 @@ import {
   isGatewayAgentRunPending,
 } from "./subagent-announce-completion-delivery.js";
 import {
+  normalizeCompletionHandoffKey,
+  releaseCompletionHandoffKey,
+  retainCompletionHandoffKey,
+  shouldJoinOriginalCompletionHandoff,
+} from "./subagent-announce-completion-handoff-retention.js";
+import {
   hasAnnounceSendEvidence,
   isIncompleteAnnounceAgentResultError,
   isPermanentAnnounceDeliveryError,
@@ -59,12 +65,12 @@ import {
 import {
   dispatchSubagentAnnounceAgent,
   getSubagentAnnounceRuntimeConfig,
-  isActiveEmbeddedRunId,
   resolveSubagentRequesterSessionAbandonment,
   loadRequesterSessionEntry,
   resolveExternalBestEffortDeliveryTarget,
   resolveQueueSettings,
 } from "./subagent-announce-delivery.runtime.js";
+export { clearRetainedCompletionHandoffKeysForTest } from "./subagent-announce-completion-handoff-retention.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import type { SubagentCompletionToolHandoffRegistration } from "./subagent-announce-handoff.js";
 import {
@@ -72,44 +78,6 @@ import {
   type DeliveryContext,
 } from "./subagent-announce-origin.js";
 import { resolveRequesterStoreKey } from "./subagent-requester-store-key.js";
-
-/** Idempotency keys whose Gateway handoff already accepted (in_flight / pending).
- * Retained so a later retry joins that handoff instead of steering into a
- * successor requester run after the original handle settles. */
-const retainedCompletionHandoffKeys = new Set<string>();
-
-function normalizeCompletionHandoffKey(key: string | undefined): string | undefined {
-  const normalized = key?.trim();
-  return normalized || undefined;
-}
-
-function retainCompletionHandoffKey(key: string | undefined): void {
-  const normalized = normalizeCompletionHandoffKey(key);
-  if (normalized) {
-    retainedCompletionHandoffKeys.add(normalized);
-  }
-}
-
-function releaseCompletionHandoffKey(key: string | undefined): void {
-  const normalized = normalizeCompletionHandoffKey(key);
-  if (normalized) {
-    retainedCompletionHandoffKeys.delete(normalized);
-  }
-}
-
-export function clearRetainedCompletionHandoffKeysForTest(): void {
-  retainedCompletionHandoffKeys.clear();
-}
-
-function shouldJoinOriginalCompletionHandoff(key: string | undefined): boolean {
-  const normalized = normalizeCompletionHandoffKey(key);
-  if (!normalized) {
-    return false;
-  }
-  // Prefer Gateway replay whenever we already own a pending handoff for this
-  // key, or the original run is still the active embedded handle.
-  return retainedCompletionHandoffKeys.has(normalized) || isActiveEmbeddedRunId(normalized);
-}
 
 async function runAnnounceAgentCall(params: {
   agentParams: Record<string, unknown>;
