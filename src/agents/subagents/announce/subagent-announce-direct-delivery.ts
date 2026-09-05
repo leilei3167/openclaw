@@ -1,7 +1,7 @@
-import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 /**
  * Requester-agent handoff and direct delivery for subagent announcements.
  */
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { completionRequiresMessageToolDelivery } from "../../../auto-reply/reply/completion-delivery-policy.js";
 import { stringifyRouteThreadId } from "../../../plugin-sdk/channel-route.js";
@@ -50,6 +50,7 @@ import {
   normalizeCompletionHandoffKey,
   releaseCompletionHandoffKey,
   retainCompletionHandoffKey,
+  settleCompletionHandoffRetention,
   shouldJoinOriginalCompletionHandoff,
 } from "./subagent-announce-completion-handoff-retention.js";
 import {
@@ -70,7 +71,6 @@ import {
   resolveExternalBestEffortDeliveryTarget,
   resolveQueueSettings,
 } from "./subagent-announce-delivery.runtime.js";
-export { clearRetainedCompletionHandoffKeysForTest } from "./subagent-announce-completion-handoff-retention.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import type { SubagentCompletionToolHandoffRegistration } from "./subagent-announce-handoff.js";
 import {
@@ -78,6 +78,8 @@ import {
   type DeliveryContext,
 } from "./subagent-announce-origin.js";
 import { resolveRequesterStoreKey } from "./subagent-requester-store-key.js";
+
+export { clearRetainedCompletionHandoffKeysForTest } from "./subagent-announce-completion-handoff-retention.js";
 
 async function runAnnounceAgentCall(params: {
   agentParams: Record<string, unknown>;
@@ -137,7 +139,14 @@ async function runAnnounceAgentCall(params: {
   }
 }
 
-export async function sendSubagentAnnounceDirectly(params: {
+export async function sendSubagentAnnounceDirectly(
+  params: Parameters<typeof sendSubagentAnnounceDirectlyUnchecked>[0],
+): Promise<SubagentAnnounceDeliveryResult> {
+  const result = await sendSubagentAnnounceDirectlyUnchecked(params);
+  return settleCompletionHandoffRetention(params.directIdempotencyKey, result);
+}
+
+async function sendSubagentAnnounceDirectlyUnchecked(params: {
   requesterSessionKey: string;
   requesterAgentId?: string;
   targetRequesterSessionKey: string;

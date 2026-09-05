@@ -4,8 +4,17 @@
  * When an announce gets a nonterminal gateway response (accepted / in_flight),
  * keep the idempotency key so a later retry rejoins that handoff instead of
  * steering into a successor requester run after the original handle settles.
+ *
+ * Retention is bound to the announce lifecycle: keep across retryable attempts,
+ * release on terminal retirement (success, abandonment, permanent failure,
+ * deadline expiry / give-up, intentional non-delivery).
  */
+import {
+  buildAnnounceIdFromChildRun,
+  buildAnnounceIdempotencyKey,
+} from "../../announce-idempotency.js";
 import { isActiveEmbeddedRunId } from "./subagent-announce-delivery.runtime.js";
+import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 
 const retainedCompletionHandoffKeys = new Set<string>();
 
@@ -28,8 +37,41 @@ export function releaseCompletionHandoffKey(key: string | undefined): void {
   }
 }
 
+/** Release retained ownership when announce delivery finally retires a child run. */
+export function releaseAnnounceCompletionHandoffForChildRun(params: {
+  childSessionKey: string;
+  childRunId: string;
+}): void {
+  releaseCompletionHandoffKey(
+    buildAnnounceIdempotencyKey(
+      buildAnnounceIdFromChildRun({
+        childSessionKey: params.childSessionKey,
+        childRunId: params.childRunId,
+      }),
+    ),
+  );
+}
+
+/**
+ * Keep ownership across retryable attempts; release on every terminal outcome.
+ */
+export function settleCompletionHandoffRetention(
+  key: string | undefined,
+  result: SubagentAnnounceDeliveryResult,
+): SubagentAnnounceDeliveryResult {
+  if (result.disposition !== "retryable") {
+    releaseCompletionHandoffKey(key);
+  }
+  return result;
+}
+
 export function clearRetainedCompletionHandoffKeysForTest(): void {
   retainedCompletionHandoffKeys.clear();
+}
+
+export function hasRetainedCompletionHandoffKeyForTest(key: string | undefined): boolean {
+  const normalized = normalizeCompletionHandoffKey(key);
+  return Boolean(normalized && retainedCompletionHandoffKeys.has(normalized));
 }
 
 export function shouldJoinOriginalCompletionHandoff(key: string | undefined): boolean {
