@@ -1,7 +1,7 @@
-import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 /**
  * Requester-agent handoff and direct delivery for subagent announcements.
  */
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { completionRequiresMessageToolDelivery } from "../../../auto-reply/reply/completion-delivery-policy.js";
@@ -51,6 +51,13 @@ import {
   isGatewayAgentRunPending,
 } from "./subagent-announce-completion-delivery.js";
 import {
+  normalizeCompletionHandoffKey,
+  releaseCompletionHandoffKey,
+  retainCompletionHandoffKey,
+  settleCompletionHandoffRetention,
+  shouldJoinOriginalCompletionHandoff,
+} from "./subagent-announce-completion-handoff-retention.js";
+import {
   hasAnnounceSendEvidence,
   isIncompleteAnnounceAgentResultError,
   isPermanentAnnounceDeliveryError,
@@ -77,6 +84,8 @@ import {
 import { resolveRequesterStoreKey } from "./subagent-requester-store-key.js";
 
 const REQUESTER_FINAL_VISIBLE_TEXT_MAX_CHARS = 12_000;
+
+export { clearRetainedCompletionHandoffKeysForTest } from "./subagent-announce-completion-handoff-retention.js";
 
 async function runAnnounceAgentCall(params: {
   agentParams: Record<string, unknown>;
@@ -127,7 +136,14 @@ async function runAnnounceAgentCall(params: {
   }
 }
 
-export async function sendSubagentAnnounceDirectly(params: {
+export async function sendSubagentAnnounceDirectly(
+  params: Parameters<typeof sendSubagentAnnounceDirectlyUnchecked>[0],
+): Promise<SubagentAnnounceDeliveryResult> {
+  const result = await sendSubagentAnnounceDirectlyUnchecked(params);
+  return settleCompletionHandoffRetention(params.directIdempotencyKey, result);
+}
+
+async function sendSubagentAnnounceDirectlyUnchecked(params: {
   requesterSessionKey: string;
   requesterAgentId?: string;
   targetRequesterSessionKey: string;
@@ -308,10 +324,21 @@ export async function sendSubagentAnnounceDirectly(params: {
         directOrigin?.channel,
       sessionEntry: requesterEntry,
     });
+    // Prefer joining the original Gateway handoff (same idempotency key) over
+    // steering into whatever requester run is active. A prior in_flight retains
+    // ownership even after that handle settles and a successor run becomes
+    // active; first-attempt steering still applies when nothing is retained.
+    const pendingHandoffRunId = normalizeCompletionHandoffKey(params.directIdempotencyKey);
+    const joinOriginalHandoff = Boolean(
+      pendingHandoffRunId &&
+      (requesterActivity.runId === pendingHandoffRunId ||
+        shouldJoinOriginalCompletionHandoff(pendingHandoffRunId)),
+    );
     if (
       params.expectsCompletionMessage &&
       requesterActivity.sessionId &&
-      requesterActivity.isActive
+      requesterActivity.isActive &&
+      !joinOriginalHandoff
     ) {
       const wakeOptions: EmbeddedAgentQueueMessageOptions = {
         deliveryTimeoutMs: announceTimeoutMs,
@@ -488,11 +515,24 @@ export async function sendSubagentAnnounceDirectly(params: {
 
     const directAnnounceStillPending = isGatewayAgentRunPending(directAnnounceResponse);
     if (directAnnounceStillPending) {
+      // Idempotent replay can return in_flight / admissionPending while the
+      // original handoff is still running. Do not credit delivery yet; keep
+      // custody retryable and suppress same-attempt media fallback. Retain the
+      // key so a later retry rejoins this handoff instead of steering into a
+      // successor requester run after settlement.
+      retainCompletionHandoffKey(params.directIdempotencyKey);
       return {
-        delivered: true,
+        delivered: false,
         path: "direct",
+        reason: "completion_handoff_pending",
+        disposition: "retryable",
+        terminal: true,
       };
     }
+
+    // Gateway produced a terminal (non-pending) result for this key — release
+    // retained ownership so later unrelated turns can steer normally.
+    releaseCompletionHandoffKey(params.directIdempotencyKey);
 
     const directAnnounceResult = getGatewayAgentResult(directAnnounceResponse);
     const hasFinalMessagingToolDelivery = Boolean(

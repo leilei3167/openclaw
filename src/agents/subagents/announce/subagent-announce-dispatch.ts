@@ -157,6 +157,7 @@ export async function runSubagentAnnounceDispatch(params: {
   appendPhase("direct-primary", primaryDirect);
   if (
     primaryDirect.delivered ||
+    primaryDirect.terminal ||
     primaryDirect.disposition === "session_queued" ||
     primaryDirect.disposition === "intentional_non_delivery" ||
     primaryDirect.disposition === "ambiguous" ||
