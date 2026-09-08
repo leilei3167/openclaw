@@ -73,6 +73,7 @@ import {
 } from "./model-fallback-observation.js";
 import {
   MODEL_FALLBACK_SKIPPED_CODE,
+  type FallbackAttempt,
   type ModelFallbackCandidate,
   type ModelFallbackRouteResolution,
 } from "./model-fallback.types.js";
