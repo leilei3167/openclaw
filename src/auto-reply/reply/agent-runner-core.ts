@@ -1,6 +1,7 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasSessionAutoModelFallbackProvenance } from "../../agents/agent-scope.js";
 import { hasVisibleCommittedMessagingToolDeliveryEvidence } from "../../agents/embedded-agent-runner/delivery-evidence.js";
+import { MODEL_FALLBACK_SKIPPED_CODE } from "../../agents/model-fallback.types.js";
 import type { ModelRef } from "../../agents/model-ref-shared.js";
 import { areRuntimeModelRefsEquivalent } from "../../agents/model-runtime-aliases.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -108,9 +109,10 @@ export function buildSilentFallbackFailurePayload(params: {
     }),
   );
   let primary = `⚠️ The configured model backend ${selected} produced no usable reply. `;
-  // Missing attribution cannot strengthen a claim about the selected backend.
+  // Local skips retain old failure reasons, not evidence of a new backend attempt.
   if (
     selectedAttempts.length > 0 &&
+    selectedAttempts.every((attempt) => attempt.code !== MODEL_FALLBACK_SKIPPED_CODE) &&
     attempts.every((attempt) => attempt.provider.trim() && attempt.model.trim())
   ) {
     if (

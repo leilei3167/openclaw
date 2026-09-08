@@ -120,6 +120,14 @@ describe("buildSilentFallbackFailurePayload", () => {
     { label: "permanent auth", attempts: [attempt("auth_permanent")] },
     { label: "billing", attempts: [attempt("billing")] },
     { label: "rate limit", attempts: [attempt("rate_limit")] },
+    ...(["timeout", "overloaded", "format", "empty_response"] as const).map((reason) => ({
+      label: `local skip retaining ${reason}`,
+      attempts: [attempt(reason, { code: "MODEL_FALLBACK_SKIPPED" })],
+    })),
+    {
+      label: "local skip beside a response",
+      attempts: [attempt("format"), attempt("format", { code: "MODEL_FALLBACK_SKIPPED" })],
+    },
     { label: "transport then response", attempts: [attempt("timeout"), attempt("format")] },
     { label: "response then transport", attempts: [attempt("format"), attempt("timeout")] },
     { label: "other backend only", attempts: [attempt("format", other)] },
