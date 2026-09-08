@@ -1665,18 +1665,18 @@ jobs:
                   // current isolated and Docker catalogs exclude the Go owner.
                   return (plan.shard_name ?? plan.shardName).startsWith("core-tooling");
                 }),
-                requires_ripgrep:
-                  shard.targets?.includes("src/agents/sessions/tools/index.test.ts") ||
-                  shard.includePatterns?.includes("src/agents/sessions/tools/index.test.ts") ||
-                  (shard.shardName === "agentic-agents-support" && !shard.includePatterns) ||
-                  shard.groups?.some(
-                    (group) =>
-                      group.includePatterns?.includes(
-                        "src/agents/sessions/tools/index.test.ts",
-                      ) ||
-                      (group.shard_name === "agentic-agents-support" &&
-                        !group.includePatterns),
-                   ),
+                requires_ripgrep: (shard.groups ?? [shard]).some((plan) => {
+                  const patterns = plan.targets ?? plan.includePatterns;
+                  if (patterns) {
+                    return patterns.some((pattern) => [
+                      "src/agents/sessions/tools/index.test.ts",
+                      "src/agents/filesystem-tools-output-contract.test.ts",
+                    ].some((test) => matchesGlob(test, pattern)));
+                  }
+                  return ["agentic-agents-support", "agentic-agents-core-runtime"].includes(
+                    plan.shard_name ?? plan.shardName,
+                  );
+                }),
               };
             });
           const nodeTestNonDistShards = nodeTestShards.filter((shard) => !shard.requires_dist);
@@ -2832,12 +2832,22 @@ jobs:
             ui/src/e2e/chat-widget-sandbox.real-gateway.e2e.test.ts \
             ui/src/e2e/command-palette-catalog.real-gateway.e2e.test.ts \
             ui/src/e2e/cron-duration-save.real-gateway.e2e.test.ts \
+            ui/src/e2e/model-picker-search.real-gateway.e2e.test.ts \
             ui/src/e2e/device-alias-rename.real-gateway.e2e.test.ts \
             ui/src/e2e/session-progress-hovercard.real-gateway.e2e.test.ts \
             extensions/qa-lab/src/control-ui-media-transcript.real-gateway.e2e.test.ts \
             extensions/qa-lab/src/session-host-command-state.real-gateway.e2e.test.ts \
             extensions/qa-lab/src/control-ui-openclaw-delegation.real-gateway.e2e.test.ts \
             extensions/qa-lab/src/control-ui-automation-management.real-gateway.e2e.test.ts
+
+      - name: Upload model picker public observations
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: model-picker-public-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/control-ui-e2e/real-gateway/model-picker-public-*
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload sanitized Control UI real-Gateway proof
         if: always() && github.event_name == 'workflow_dispatch' && inputs.capture_ui_proof
@@ -3351,7 +3361,7 @@ jobs:
           node openclaw.mjs --help
           node openclaw.mjs status --json --timeout 1
           pnpm test:build:singleton
-          pnpm test src/config/sessions/session-suggestion-store.test.ts src/config/sessions/session-sharing-store.test.ts src/config/sessions/session-accessor.creation-snapshot.test.ts
+          pnpm test src/config/sessions/session-accessor.test.ts src/config/sessions/store-writer.test.ts src/config/sessions/sessions.test.ts
 
   checks-node-core-test-nondist-shard:
     permissions:

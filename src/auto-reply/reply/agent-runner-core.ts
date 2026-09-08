@@ -1,8 +1,6 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasSessionAutoModelFallbackProvenance } from "../../agents/agent-scope.js";
 import { hasVisibleCommittedMessagingToolDeliveryEvidence } from "../../agents/embedded-agent-runner/delivery-evidence.js";
-import { resolveFailoverStatus } from "../../agents/failover-error.js";
-import type { FailoverReason } from "../../agents/failover/signal.js";
 import type { ModelRef } from "../../agents/model-ref-shared.js";
 import { areRuntimeModelRefsEquivalent } from "../../agents/model-runtime-aliases.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -22,7 +20,6 @@ import {
   normalizeDeliveryContext,
 } from "../../utils/delivery-context.shared.js";
 import { resolveFallbackTransition } from "../fallback-state.js";
-import { formatProviderModelRef } from "../model-runtime.js";
 import {
   isReplyPayloadTerminalContent,
   markReplyPayloadForSourceSuppressionDelivery,
@@ -32,6 +29,7 @@ import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import type { RuntimeFallbackAttempt } from "./agent-runner-execution.types.js";
 import {
   buildKnownAgentRunFailureReplyPayload,
   buildTerminalAgentRunFailureReplyPayload,
@@ -79,82 +77,11 @@ export function markBeforeAgentRunBlockedPayloads(payloads: ReplyPayload[]): Rep
   );
 }
 
-function isTransportUnreachableFailoverReason(reason: FailoverReason): boolean {
-  // Match resolveFailoverStatus's 5xx/timeout partition — the only classes where
-  // "couldn't reach" is accurate for the configured backend (#141694).
-  const status = resolveFailoverStatus(reason);
-  return (
-    status === 408 || status === 502 || status === 503 || (status !== undefined && status >= 500)
-  );
-}
-
-type SilentFallbackAttemptEvidence = {
-  reason: FailoverReason;
-  /** Present only when a provider call produced a classified status. Local cooldown/session skips omit it. */
-  status?: number;
-  /** Runtime attempt identity; used to scope responded/unreachable claims to selectedModelRef. */
-  provider?: string;
-  model?: string;
-};
-
-function isPositiveNonTransportResponseEvidence(attempt: SilentFallbackAttemptEvidence): boolean {
-  // Only format / empty_response imply a contacted-backend application outcome.
-  // auth/billing/rate_limit (even with status) can be synthetic local failover
-  // mappings from resolveFailoverStatus — do not treat them as "responded".
-  return attempt.reason === "empty_response" || attempt.reason === "format";
-}
-
-function attemptMatchesSelectedModelRef(
-  attempt: SilentFallbackAttemptEvidence,
-  selectedModelRef: string,
-): boolean {
-  const provider = attempt.provider?.trim();
-  const model = attempt.model?.trim();
-  if (!provider || !model) {
-    return false;
-  }
-  return areRuntimeModelRefsEquivalent(formatProviderModelRef(provider, model), selectedModelRef);
-}
-
-function selectAttemptsForSelectedBackendClaim(
-  attempts: ReadonlyArray<SilentFallbackAttemptEvidence>,
-  selectedModelRef: string,
-): ReadonlyArray<SilentFallbackAttemptEvidence> {
-  const attributed = attempts.filter(
-    (attempt) => Boolean(attempt.provider?.trim()) && Boolean(attempt.model?.trim()),
-  );
-  // Legacy callers without provider/model keep all-attempt behavior.
-  if (attributed.length === 0) {
-    return attempts;
-  }
-  return attributed.filter((attempt) => attemptMatchesSelectedModelRef(attempt, selectedModelRef));
-}
-
-function shouldClaimConfiguredBackendUnreachable(
-  attempts: ReadonlyArray<SilentFallbackAttemptEvidence>,
-  selectedModelRef: string,
-): boolean {
-  const scoped = selectAttemptsForSelectedBackendClaim(attempts, selectedModelRef);
-  return (
-    scoped.length > 0 &&
-    scoped.every((attempt) => isTransportUnreachableFailoverReason(attempt.reason))
-  );
-}
-
-function shouldClaimConfiguredBackendResponded(
-  attempts: ReadonlyArray<SilentFallbackAttemptEvidence>,
-  selectedModelRef: string,
-): boolean {
-  const scoped = selectAttemptsForSelectedBackendClaim(attempts, selectedModelRef);
-  return (
-    scoped.length > 0 && scoped.every((attempt) => isPositiveNonTransportResponseEvidence(attempt))
-  );
-}
-
 export function buildSilentFallbackFailurePayload(params: {
   fallbackTransition: ReturnType<typeof resolveFallbackTransition>;
   fallbackFailureKnown: boolean;
-  fallbackAttempts?: ReadonlyArray<SilentFallbackAttemptEvidence>;
+  fallbackAttempts: readonly RuntimeFallbackAttempt[];
+  cfg: OpenClawConfig;
   isHeartbeat: boolean;
   hasSuccessfulTerminalDelivery: boolean;
   allowEmptyAssistantReplyAsSilent?: boolean;
@@ -174,14 +101,30 @@ export function buildSilentFallbackFailurePayload(params: {
   }
   const selected = params.fallbackTransition.selectedModelRef;
   const active = params.fallbackTransition.activeModelRef;
-  const attempts = params.fallbackAttempts ?? [];
-  const claimUnreachable = shouldClaimConfiguredBackendUnreachable(attempts, selected);
-  const claimResponded = shouldClaimConfiguredBackendResponded(attempts, selected);
-  const primary = claimUnreachable
-    ? `⚠️ I couldn't reach the configured model backend ${selected}. `
-    : claimResponded
-      ? `⚠️ The configured model backend ${selected} responded but produced no usable reply. `
-      : `⚠️ The configured model backend ${selected} produced no usable reply. `;
+  const attempts = params.fallbackAttempts;
+  const selectedAttempts = attempts.filter((attempt) =>
+    areRuntimeModelRefsEquivalent(`${attempt.provider}/${attempt.model}`, selected, {
+      config: params.cfg,
+    }),
+  );
+  let primary = `⚠️ The configured model backend ${selected} produced no usable reply. `;
+  // Missing attribution cannot strengthen a claim about the selected backend.
+  if (
+    selectedAttempts.length > 0 &&
+    attempts.every((attempt) => attempt.provider.trim() && attempt.model.trim())
+  ) {
+    if (
+      selectedAttempts.every(({ reason }) =>
+        ["timeout", "server_error", "overloaded", "tls_certificate"].includes(reason),
+      )
+    ) {
+      primary = `⚠️ I couldn't reach the configured model backend ${selected}. `;
+    } else if (
+      selectedAttempts.every(({ reason }) => reason === "format" || reason === "empty_response")
+    ) {
+      primary = `⚠️ The configured model backend ${selected} responded but produced no usable reply. `;
+    }
+  }
   return markReplyPayloadForSourceSuppressionDelivery({
     text: `${primary}Fallback used ${active}, but it produced no visible reply.`,
     isError: true,
