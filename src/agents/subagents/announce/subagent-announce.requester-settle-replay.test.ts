@@ -15,6 +15,7 @@ import { sendSubagentAnnounceDirectly } from "./subagent-announce-direct-deliver
 import { maybeWakeRequesterAfterAllChildrenSettled } from "./subagent-announce.requester-settle-wake.js";
 
 const registryRead = vi.hoisted(() => ({
+  getLatestLiveSubagentRunByChildSessionKey: vi.fn(() => undefined),
   hasDescendantRunAwaitingSettle: vi.fn(() => false),
   listSubagentRunsForRequester: vi.fn<() => SubagentRunRecord[]>(() => []),
   getLatestSubagentRunByChildSessionKey: vi.fn(() => undefined),

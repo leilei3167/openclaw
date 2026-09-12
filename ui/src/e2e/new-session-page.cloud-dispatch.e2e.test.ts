@@ -419,9 +419,9 @@ suite.define(() => {
       await expect.poll(() => startButton.isDisabled()).toBe(false);
       await trigger.click();
       const retainedCloudProfile = place.locator('[data-value="cloud:aws"]');
+      const retainedMachine = place.locator('[data-value="machine:fast"]');
       await expect.poll(() => retainedCloudProfile.isDisabled()).toBe(false);
       await retainedCloudProfile.click();
-      const retainedMachine = place.locator('[data-value="machine:fast"]');
       await expect.poll(() => retainedMachine.isVisible()).toBe(true);
       expect(await retainedMachine.getAttribute("aria-pressed")).toBe("true");
       if (captureUiProofEnabled) {

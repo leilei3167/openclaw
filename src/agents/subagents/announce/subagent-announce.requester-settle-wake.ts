@@ -4,8 +4,6 @@
  * Lifecycle owns the persisted outbox state on retained subagent run rows;
  * this module selects a drained wave and delivers its synthesized wake.
  */
-import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
-import { SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import { getRuntimeConfig } from "../../../config/config.js";
 import { logWarn } from "../../../logger.js";
 import { getSharedGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
@@ -23,7 +21,6 @@ import {
   buildRequesterSettleAnnounceId,
 } from "../../announce-idempotency.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
-import { ANNOUNCE_COMPLETION_HARD_EXPIRY_MS } from "../registry/subagent-registry-helpers.js";
 import {
   countActiveDescendantRuns,
   getLatestLiveSubagentRunByChildSessionKey,
@@ -31,10 +28,7 @@ import {
   hasDescendantRunAwaitingSettle,
   listSubagentRunsForRequester,
 } from "../registry/subagent-registry-read.js";
-import type {
-  RequesterSettleWakeState,
-  SubagentRunRecord,
-} from "../registry/subagent-registry.types.js";
+import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import { hasSubagentRunEnded } from "../registry/subagent-run-liveness.js";
 import {
   consumeRequesterFinalAttachment,
@@ -54,8 +48,18 @@ import {
   filterCurrentDirectChildCompletionRows,
 } from "./subagent-announce-output.js";
 import { hasUsableSessionEntry } from "./subagent-announce.js";
+import {
+  buildConnectedSettledWave,
+  buildRequesterSettleWakeMessage,
+  handleRequesterSettlePendingHandoff,
+  readSharedBatchState,
+  REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS,
+  truncateRequesterSettleRouteNotices,
+  withWakeDeadline,
+  type RequesterSettleWakeBatchState,
+} from "./subagent-announce.requester-settle-wake-helpers.js";
 
-export type RequesterSettleWakeBatchState = Omit<RequesterSettleWakeState, "retireAfterSettle">;
+export type { RequesterSettleWakeBatchState } from "./subagent-announce.requester-settle-wake-helpers.js";
 
 type RequesterSettleWakeBatchCallbacks = {
   transitionBatch: (
@@ -72,150 +76,7 @@ type RequesterSettleWakeBatchCallbacks = {
 const REQUESTER_SETTLE_WAKE_MAX_ATTEMPTS = 3;
 const REQUESTER_SETTLE_WAKE_MAX_AMBIGUOUS_REPLAYS = 3;
 const REQUESTER_SETTLE_WAKE_MAX_DEFERRALS = 10;
-const REQUESTER_SETTLE_WAKE_ROUTE_NOTICE_MAX_CHARS = 1_024;
-const ROUTE_NOTICE_TRUNCATION = "\n[model-route changes truncated]";
-const REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS = [30_000, 120_000] as const;
 const activeRequesterSettleWakeBatches = new Map<string, () => boolean>();
-
-function resolveRequesterSettleObservationDeadline(
-  batch: readonly SubagentRunRecord[],
-  state: RequesterSettleWakeBatchState,
-  now: number,
-): number {
-  if (typeof state.deadlineAt === "number") {
-    return state.deadlineAt;
-  }
-  // Prefer the existing announce delivery deadline when the batch still owns one.
-  const inherited = batch
-    .map((entry) =>
-      entry.expectsCompletionMessage === true && typeof entry.delivery?.deadlineAt === "number"
-        ? entry.delivery.deadlineAt
-        : undefined,
-    )
-    .filter((value): value is number => typeof value === "number");
-  if (inherited.length > 0) {
-    return Math.min(...inherited);
-  }
-  // Same hard expiry clock as completion announce cleanup.
-  return now + ANNOUNCE_COMPLETION_HARD_EXPIRY_MS;
-}
-
-function withWakeDeadline(
-  deadlineAt: number | undefined,
-): Pick<RequesterSettleWakeBatchState, "deadlineAt"> {
-  return typeof deadlineAt === "number" ? { deadlineAt } : {};
-}
-
-function buildRequesterSettleWakeMessage(params: {
-  findings?: string;
-  requireVisibleReply: boolean;
-  modelRouteChange?: string;
-  preserveModelRouteNotice: boolean;
-}): string {
-  return [
-    "[Subagent Context] Every subagent spawned from this session has now settled — none are still running or awaiting completion delivery.",
-    "[Subagent Context] Do not keep waiting or call sessions_yield again for this batch; no further completion events will arrive.",
-    "[Subagent Context] Child settlement ends this batch, not necessarily the original user request. Review the results against the requested outcome and continue any remaining in-scope work before replying.",
-    params.requireVisibleReply
-      ? "[Subagent Context] Child completion delivery is internal; the original user request still requires your visible final answer only after the requested outcome is complete or genuinely blocked."
-      : `[Subagent Context] Reply ONLY: ${SILENT_REPLY_TOKEN} only if you already delivered the consolidated final answer for this batch.`,
-    ...(params.modelRouteChange
-      ? [
-          params.modelRouteChange,
-          params.preserveModelRouteNotice
-            ? "[Subagent Context] Preserve this runtime-authored model-route change notice in your final answer."
-            : "[Subagent Context] Keep this runtime-authored model-route change notice internal on this shared surface.",
-        ]
-      : []),
-    "",
-    params.findings ??
-      "(each child result was announced individually in earlier completion events)",
-  ].join("\n");
-}
-
-function buildConnectedSettledWave(
-  candidates: readonly SubagentRunRecord[],
-  settledEntry: SubagentRunRecord,
-): SubagentRunRecord[] {
-  const targetIndex = candidates.findIndex((entry) => entry.runId === settledEntry.runId);
-  const target = candidates[targetIndex];
-  if (!target) {
-    return [];
-  }
-
-  const sorted = candidates
-    .map((entry, originalIndex) => ({
-      entry,
-      originalIndex,
-      endedAt:
-        typeof entry.execution.endedAt === "number"
-          ? entry.execution.endedAt
-          : Number.MAX_SAFE_INTEGER,
-    }))
-    .toSorted(
-      (a, b) =>
-        a.entry.createdAt - b.entry.createdAt ||
-        a.endedAt - b.endedAt ||
-        a.originalIndex - b.originalIndex,
-    );
-  const first = sorted[0];
-  if (!first) {
-    return [];
-  }
-
-  let componentStart = 0;
-  let componentEnd = first.endedAt;
-  let containsTarget = first.originalIndex === targetIndex;
-  for (let index = 1; index <= sorted.length; index += 1) {
-    const next = sorted[index];
-    // Interval-graph components are contiguous after sorting by spawn time.
-    // Spawn time, rather than execution admission, keeps capacity-queued siblings together.
-    if (!next || next.entry.createdAt > componentEnd) {
-      if (containsTarget) {
-        const component = sorted
-          .slice(componentStart, index)
-          .filter((item) => item.originalIndex !== targetIndex)
-          .toSorted((a, b) => a.originalIndex - b.originalIndex);
-        return [target, ...component.map((item) => item.entry)];
-      }
-      if (!next) {
-        break;
-      }
-      componentStart = index;
-      componentEnd = next.endedAt;
-      containsTarget = next.originalIndex === targetIndex;
-      continue;
-    }
-    componentEnd = Math.max(componentEnd, next.endedAt);
-    containsTarget ||= next.originalIndex === targetIndex;
-  }
-  return [];
-}
-
-function readSharedBatchState(batch: readonly SubagentRunRecord[]): RequesterSettleWakeBatchState {
-  const states = batch
-    .map((entry) => entry.requesterSettleWake)
-    .filter((state): state is RequesterSettleWakeState => Boolean(state));
-  const dispatching = states.find((state) => state.status === "dispatching");
-  const source = dispatching ?? states[0];
-  return {
-    status: source?.status ?? "pending",
-    attemptCount: Math.max(0, ...states.map((state) => state.attemptCount)),
-    ...(source?.replayCount !== undefined ? { replayCount: source.replayCount } : {}),
-    ...(source?.nextAttemptAt !== undefined ? { nextAttemptAt: source.nextAttemptAt } : {}),
-    ...(source?.deadlineAt !== undefined ? { deadlineAt: source.deadlineAt } : {}),
-    ...(source?.batchRunIds ? { batchRunIds: [...source.batchRunIds] } : {}),
-    ...(states.some((state) => state.requesterYieldBatch === true)
-      ? { requesterYieldBatch: true }
-      : {}),
-    ...(states.some((state) => state.afterRequesterYield === true)
-      ? { afterRequesterYield: true }
-      : {}),
-    ...(source?.rearmGeneration !== undefined ? { rearmGeneration: source.rearmGeneration } : {}),
-    ...(source?.lastError !== undefined ? { lastError: source.lastError } : {}),
-    deferralCount: Math.max(0, ...states.map((state) => state.deferralCount ?? 0)),
-  };
-}
 
 /**
  * Wakes a top-level or explicitly yielded nested requester once its last child
@@ -491,10 +352,7 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
   ]
     .toSorted()
     .join("\n");
-  const modelRouteChange =
-    routeNotices.length > REQUESTER_SETTLE_WAKE_ROUTE_NOTICE_MAX_CHARS
-      ? `${truncateUtf16Safe(routeNotices, REQUESTER_SETTLE_WAKE_ROUTE_NOTICE_MAX_CHARS - ROUTE_NOTICE_TRUNCATION.length)}${ROUTE_NOTICE_TRUNCATION}`
-      : routeNotices;
+  const modelRouteChange = truncateRequesterSettleRouteNotices(routeNotices);
   const completionChannel = normalizeMessageChannel(directOrigin?.channel);
   const wakeMessage = buildRequesterSettleWakeMessage({
     findings,
@@ -740,42 +598,14 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
     // backoffs without spending the failure replay budget; retire only on
     // terminal evidence or the owning lifecycle deadline.
     if (delivery.reason === "completion_handoff_pending") {
-      const now = Date.now();
-      const lastError = delivery.error ?? delivery.reason ?? "completion_handoff_pending";
-      const deadlineAt = resolveRequesterSettleObservationDeadline(settledBatch, state, now);
-      if (now >= deadlineAt) {
-        completeBatch(settledBatch, state.rearmGeneration, {
-          delivered: false,
-          path: "none",
-          error: "requester settle wake expired",
-        });
-        return false;
-      }
-      const alreadyPending =
-        state.lastError === "completion_handoff_pending" || state.lastError === lastError;
-      // Index with literals so noUncheckedIndexedAccess stays definite (const tuple).
-      const retryDelayMs = alreadyPending
-        ? REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS[1]
-        : REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS[0];
-      const nextAttemptAt = Math.min(now + retryDelayMs, deadlineAt);
-      state = {
-        status: "dispatching",
-        attemptCount: state.attemptCount,
-        // Preserve any prior transport-failure replayCount; do not increment it.
-        ...(state.replayCount !== undefined ? { replayCount: state.replayCount } : {}),
-        nextAttemptAt,
-        deadlineAt,
+      return handleRequesterSettlePendingHandoff({
+        settledBatch,
+        state,
+        delivery,
         batchRunIds,
-        ...(state.requesterYieldBatch === true ? { requesterYieldBatch: true } : {}),
-        ...(state.afterRequesterYield === true ? { afterRequesterYield: true } : {}),
-        ...(state.rearmGeneration !== undefined ? { rearmGeneration: state.rearmGeneration } : {}),
-        lastError,
-      };
-      params.transitionBatch(settledBatch, state);
-      logWarn(
-        `requester settle wake pending handoff observation scheduled in ${Math.round((nextAttemptAt - now) / 1000)}s: ${lastError}`,
-      );
-      return false;
+        transitionBatch: params.transitionBatch,
+        completeBatch,
+      });
     }
 
     const attemptCount = attemptIndex + 1;

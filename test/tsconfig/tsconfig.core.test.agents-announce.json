@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.core.test.shard.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "../../.artifacts/tsgo-cache/core-test-agents-announce.tsbuildinfo"
+  },
+  "include": [
+    "../../src/agents/subagents/announce/**/*.test.ts",
+    "../../src/agents/subagents/announce/**/*.test.tsx"
+  ],
+  "exclude": ["../../node_modules", "../../dist", "../../**/dist/**"]
+}
