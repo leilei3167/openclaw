@@ -1,9 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DecisionReceiptV1 } from "../../../packages/gateway-protocol/src/index.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import type { AdmittedRunContext } from "../../agents/admitted-run-context.js";
 import { configureRuntimeActionDecisionSink } from "../../audit/runtime-action-decision.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import {
+  GatewayDrainingError,
+  isGatewaySubordinateWorkAdmissionClosed,
+  markGatewayRestartDraining,
+  resetGatewayWorkAdmission,
+  tryBeginGatewayRootWorkAdmission,
+} from "../../process/gateway-work-admission.js";
 import { withPluginRuntimePluginScope } from "./gateway-request-scope.js";
 import type { PluginRuntime } from "./types.js";
 
@@ -51,6 +58,7 @@ const params = {
 
 describe("plugin embedded-agent runtime admission", () => {
   beforeEach(() => {
+    resetGatewayWorkAdmission();
     vi.clearAllMocks();
     mocks.authorityActive = true;
     mocks.close.mockImplementation(() => {
@@ -62,6 +70,48 @@ describe("plugin embedded-agent runtime admission", () => {
       close: mocks.close,
     });
     mocks.runEmbeddedAgentCore.mockResolvedValue({ payloads: [] });
+  });
+
+  afterEach(resetGatewayWorkAdmission);
+
+  it("re-roots deferred plugin runs after the triggering root work is released", async () => {
+    mocks.runEmbeddedAgentCore.mockImplementationOnce(async () => {
+      if (isGatewaySubordinateWorkAdmissionClosed()) {
+        throw new GatewayDrainingError();
+      }
+      return { payloads: [] };
+    });
+
+    const root = tryBeginGatewayRootWorkAdmission("test:command-new");
+    expect(root).not.toBeNull();
+    // Gate the deferred continuation so it runs only after the triggering root
+    // is released — matching Promise/timer chains that outlive the hook.
+    const afterRelease = createDeferred<void>();
+    let deferred: Promise<unknown> | undefined;
+    await root?.run(async () => {
+      deferred = afterRelease.promise.then(() =>
+        withPluginRuntimePluginScope({ pluginId: "memory-plugin" }, () =>
+          runPluginEmbeddedAgent(params),
+        ),
+      );
+    });
+    root?.release();
+    afterRelease.resolve();
+
+    await expect(deferred).resolves.toEqual({ payloads: [] });
+    expect(mocks.runEmbeddedAgentCore).toHaveBeenCalledOnce();
+  });
+
+  it("rejects plugin embedded runs while the gateway is draining for restart", async () => {
+    markGatewayRestartDraining();
+
+    await expect(
+      withPluginRuntimePluginScope({ pluginId: "memory-plugin" }, () =>
+        runPluginEmbeddedAgent(params),
+      ),
+    ).rejects.toBeInstanceOf(GatewayDrainingError);
+    expect(mocks.runEmbeddedAgentCore).not.toHaveBeenCalled();
+    expect(mocks.prepareAgentRunAdmission).not.toHaveBeenCalled();
   });
 
   it.each(["explicit", "runtime"] as const)(

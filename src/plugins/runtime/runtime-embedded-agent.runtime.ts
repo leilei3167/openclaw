@@ -9,6 +9,7 @@ import {
 import { runEmbeddedAgent as runEmbeddedAgentCore } from "../../agents/embedded-agent.js";
 import { recordRuntimeActionDecision } from "../../audit/runtime-action-decision.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { runWithGatewayIndependentRootWorkAdmission } from "../../process/gateway-work-admission.js";
 import { getPluginRuntimeGatewayRequestScope } from "./gateway-request-scope.js";
 import type { PluginRuntime } from "./types.js";
 
@@ -32,6 +33,19 @@ export const runPluginEmbeddedAgent: PluginRuntime["agent"]["runEmbeddedAgent"] 
     throw new Error("Plugin embedded-agent execution cannot supply host run authority.");
   }
   params.abortSignal?.throwIfAborted();
+  // Deferred hook work inherits a released trigger ALS. Re-root independently so
+  // subordinate enqueue is not judged by that dead context; a real drain still refuses.
+  return await runWithGatewayIndependentRootWorkAdmission(
+    () => executePluginEmbeddedAgent(params, pluginId),
+    "plugin:run-embedded-agent",
+    params.abortSignal,
+  );
+};
+
+async function executePluginEmbeddedAgent(
+  params: Parameters<PluginRuntime["agent"]["runEmbeddedAgent"]>[0],
+  pluginId: string,
+) {
   const decisionOccurrenceId = randomUUID();
   let admittedRunContext: AdmittedRunContext | undefined;
   const config = params.config ?? getRuntimeConfig();
@@ -100,4 +114,4 @@ export const runPluginEmbeddedAgent: PluginRuntime["agent"]["runEmbeddedAgent"] 
     params.abortSignal?.removeEventListener("abort", close);
     close();
   }
-};
+}
