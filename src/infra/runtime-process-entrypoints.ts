@@ -4,6 +4,16 @@ const currentModuleUrl = import.meta.url;
 export const SQLITE_READONLY_CHILD_ARG = "--openclaw-sqlite-readonly-child";
 
 export const runtimeProcessEntrypoints = {
+  cronStreamMatcher: {
+    currentModuleUrl,
+    sourceWorkerName: "../gateway/cron-stream-matcher.worker",
+    distWorkerPath: "gateway/cron-stream-matcher.worker.js",
+  },
+  nativeHookRelayClient: {
+    currentModuleUrl,
+    sourceWorkerName: "../agents/harness/native-hook-relay-client.worker",
+    distWorkerPath: "agents/harness/native-hook-relay-client.worker.js",
+  },
   computerHost: {
     currentModuleUrl,
     sourceWorkerName: "../gateway/desktop/computer.worker",

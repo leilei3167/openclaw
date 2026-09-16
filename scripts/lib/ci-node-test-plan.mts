@@ -7,7 +7,10 @@ import {
 } from "../../test/vitest/vitest.agents-paths.mjs";
 import { cliProcessTestFiles } from "../../test/vitest/vitest.cli-process-paths.mjs";
 import { commandsLightTestFiles } from "../../test/vitest/vitest.commands-light-paths.mjs";
-import { databaseWorkerCoreTestFiles } from "../../test/vitest/vitest.database-worker-core-paths.mjs";
+import {
+  databaseWorkerCoreTestFiles,
+  isDatabaseWorkerCoreTestFile,
+} from "../../test/vitest/vitest.database-worker-core-paths.mjs";
 import {
   gatewayDatabaseWorkerTestFiles,
   gatewayPluginTestFiles,
@@ -19,7 +22,11 @@ import {
 import { fullSuiteVitestShards } from "../../test/vitest/vitest.test-shards.mjs";
 import { toolingIsolatedTestFiles } from "../../test/vitest/vitest.tooling-isolated-paths.mjs";
 import { uiIsolatedTestFiles } from "../../test/vitest/vitest.ui-isolated-paths.mjs";
-import { isPluginControlUiPath, isUiBrowserTestFile } from "../../test/vitest/vitest.ui-paths.mjs";
+import {
+  isPluginControlUiPath,
+  isUiBrowserTestFile,
+  uiTimingTestFiles,
+} from "../../test/vitest/vitest.ui-paths.mjs";
 import {
   getUnitFastIsolatedTestFiles,
   getUnitFastTestFiles,
@@ -166,6 +173,15 @@ const policyTestWatches = [
     testFile: "src/agents/model-ref-shared.test.ts",
     watchGlobs: ["extensions/anthropic/openclaw.plugin.json"],
   },
+  {
+    testFile: "src/gateway/gateway-ssh-upload-signal.test.ts",
+    watchGlobs: [
+      "src/agents/sandbox/remote-shell-transport.ts",
+      "src/agents/sandbox/remote-shell-backend.ts",
+      "src/agents/sandbox/ssh.ts",
+      "src/agents/sandbox/ssh-backend.ts",
+    ],
+  },
 ] satisfies readonly PolicyTestWatch[];
 
 /** Resolve policy tests whose scanned source surface intersects this diff. */
@@ -209,7 +225,7 @@ const EXCLUDED_PROJECT_CONFIGS = new Set([
 const DEFAULT_NODE_TEST_RUNNER = "blacksmith-8vcpu-ubuntu-2404";
 const BUNDLED_NODE_TEST_RUNNER = "blacksmith-4vcpu-ubuntu-2404";
 const EXTRA_LARGE_NODE_TEST_RUNNER = "blacksmith-32vcpu-ubuntu-2404";
-const CLI_NODE_TEST_RUNNER = "blacksmith-16vcpu-ubuntu-2404";
+const CAPACITY_NODE_TEST_RUNNER = "blacksmith-16vcpu-ubuntu-2404";
 // Startup-core transforms the broad gateway graph before its assertions run.
 // Keep enough CPU here to avoid spending minutes in Vitest imports on 4 vCPU.
 const GATEWAY_STARTUP_CORE_RUNNER = DEFAULT_NODE_TEST_RUNNER;
@@ -366,7 +382,6 @@ const COMPACT_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["agentic-control-plane-runtime", 19],
   ["agentic-control-plane-runtime-config", 20],
   ["agentic-control-plane-runtime-cron", 22],
-  ["agentic-control-plane-runtime-network", 1],
   ["agentic-control-plane-runtime-server", 23],
   ["agentic-control-plane-runtime-shared-token", 9],
   ["agentic-control-plane-runtime-state", 33],
@@ -567,7 +582,6 @@ const COMPACT_GITHUB_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["agentic-control-plane-runtime", 31],
   ["agentic-control-plane-runtime-config", 31],
   ["agentic-control-plane-runtime-cron", 52],
-  ["agentic-control-plane-runtime-network", 2],
   ["agentic-control-plane-runtime-server", 54],
   ["agentic-control-plane-runtime-shared-token", 28],
   ["agentic-control-plane-runtime-state", 55],
@@ -1329,9 +1343,6 @@ function resolveGatewayServerShardName(file: string): string {
   if (name.includes("cron")) {
     return "agentic-control-plane-runtime-cron";
   }
-  if (name.includes("network")) {
-    return "agentic-control-plane-runtime-network";
-  }
   if (
     name.includes("plugin") ||
     name.includes("hooks") ||
@@ -1376,7 +1387,6 @@ function createGatewayServerSplitShards(): NodeTestSplitShard[] {
     "agentic-control-plane-runtime",
     "agentic-control-plane-runtime-config",
     "agentic-control-plane-runtime-cron",
-    "agentic-control-plane-runtime-network",
     "agentic-control-plane-runtime-server",
     "agentic-control-plane-runtime-shared-token",
     "agentic-control-plane-runtime-state",
@@ -1630,6 +1640,9 @@ function resolveInfraShardName(file: string): string {
 function createInfraSplitShards(): NodeTestSplitShard[] {
   const groups = new Map<string, string[]>();
   for (const file of listTestFiles("src/infra")) {
+    if (isDatabaseWorkerCoreTestFile(file)) {
+      continue;
+    }
     const shardName = resolveInfraShardName(file);
     groups.set(shardName, [...(groups.get(shardName) ?? []), file]);
   }
@@ -1797,14 +1810,14 @@ function createCoreUnitSrcSecuritySplitShards(): NodeTestSplitShard[] {
 
 function createCoreRuntimeMediaUiSplitShards(): NodeTestSplitShard[] {
   const unitFastFiles = new Set(getUnitFastTestFiles());
-  const isolatedUiFiles = new Set(uiIsolatedTestFiles);
+  const separateUiFiles = new Set([...uiIsolatedTestFiles, ...uiTimingTestFiles]);
   const files = [
     ...listTestFiles("ui/src"),
     ...listTestFiles("extensions").filter(isPluginControlUiPath),
   ].filter(
     (file) =>
       isStripeEligibleTestFile(file, unitFastFiles) &&
-      !isolatedUiFiles.has(file) &&
+      !separateUiFiles.has(file) &&
       !isUiBrowserTestFile(file),
   );
   return [
@@ -1820,6 +1833,7 @@ function createCoreRuntimeMediaUiSplitShards(): NodeTestSplitShard[] {
         "test/vitest/vitest.media-understanding.config.ts",
         "test/vitest/vitest.tui.config.ts",
         "test/vitest/vitest.ui-isolated.config.ts",
+        "test/vitest/vitest.ui-timing.config.ts",
         "test/vitest/vitest.wizard.config.ts",
       ],
       requiresDist: false,
@@ -2514,7 +2528,7 @@ const WHOLE_CONFIG_SPLIT_FILE_LISTERS = new Map<string, () => string[]>([
       ...listScopedOwnerTestFiles({
         root: "src/gateway/server-methods",
         include: ["src/gateway/server-methods/**/*.test.ts"],
-        exclude: gatewayDatabaseWorkerTestFiles,
+        exclude: [...databaseWorkerCoreTestFiles, ...gatewayDatabaseWorkerTestFiles],
       }),
       ...gatewayPluginTestFiles,
     ],
@@ -2898,6 +2912,11 @@ export function createSelectedNodeTestShardBundles(
       ? createCompactNodeTestShardBundles(shards, options, "pull-request")
       : [];
   const canonicalGroups = full.flatMap((shard) => shard.groups);
+  const isWholeToolingPair = (group: NodeTestShardGroup) =>
+    group.shard_name === "core-tooling-isolated" &&
+    group.configs.length === 2 &&
+    group.configs[0] === "test/vitest/vitest.tooling-docker.config.ts" &&
+    group.configs[1] === TOOLING_ISOLATED_CONFIG;
   const selectedGroups = new Map<NodeTestShardGroup, string[]>();
   for (const target of selected) {
     if (tooling.has(target)) {
@@ -2906,8 +2925,8 @@ export function createSelectedNodeTestShardBundles(
     const matches = canonicalGroups.filter(
       (group) =>
         !group.requiresDist &&
-        group.configs.length === 1 &&
-        group.configs[0] === configs.get(target) &&
+        ((group.configs.length === 1 && group.configs[0] === configs.get(target)) ||
+          (isWholeToolingPair(group) && group.configs.includes(configs.get(target)!))) &&
         group.env?.OPENCLAW_NODE_TEST_VITEST_ARGS_JSON === undefined &&
         (!group.includePatterns || group.includePatterns.includes(target)),
     );
@@ -2931,6 +2950,10 @@ export function createSelectedNodeTestShardBundles(
         const files = selectedGroups.get(group);
         if (!files?.length) {
           return [];
+        }
+        // The paired configs share one canonical isolation and timing owner.
+        if (isWholeToolingPair(group)) {
+          return [group];
         }
         const includePatterns =
           group.includePatterns?.filter((file) => files.includes(file)) ?? files;
@@ -3305,7 +3328,7 @@ function createCompactNodeTestShardBundles(
       (isBlacksmithProfile && bin.some((group) => group.configs.includes(TOOLING_CONFIG)))
         ? EXTRA_LARGE_NODE_TEST_RUNNER
         : usesBlacksmithCapacity(runner) && bin.some((group) => group.shard_name === "agentic-cli")
-          ? CLI_NODE_TEST_RUNNER
+          ? CAPACITY_NODE_TEST_RUNNER
           : runner;
     compactJobs.push({
       checkName,
@@ -3442,5 +3465,12 @@ function createCompactNodeTestShardBundles(
     }
   }
 
+  // Preserve packing, rebalancing, check names and timing identities before
+  // requesting the available 16-vCPU class for former 32-vCPU placements.
+  for (const job of compactJobs) {
+    if (job.runner === EXTRA_LARGE_NODE_TEST_RUNNER) {
+      job.runner = CAPACITY_NODE_TEST_RUNNER;
+    }
+  }
   return compactJobs.toSorted((a, b) => a.checkName.localeCompare(b.checkName));
 }

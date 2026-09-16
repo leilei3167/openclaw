@@ -1,9 +1,15 @@
 // Chat-item projection, expansion, reply hydration, and guarded row rendering.
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { nothing } from "lit";
 import { classifySessionKind } from "../../../../../src/sessions/classify-session-kind.js";
 import { i18n } from "../../../i18n/index.ts";
 import type { MessageGroup } from "../../../lib/chat/chat-types.ts";
 import { extractTextCached } from "../../../lib/chat/message-extract.ts";
+import {
+  normalizeRoleForGrouping,
+  resolveMessageRole,
+  resolveMessageSender,
+} from "../../../lib/chat/message-normalizer.ts";
 import {
   isUiGlobalScopeConfigured,
   isSubagentSessionKey,
@@ -11,8 +17,8 @@ import {
   resolveUiGlobalAliasAgentId,
 } from "../../../lib/sessions/session-key.ts";
 import { agentRunFrameActiveStatusParts } from "../chat-agent-run-grouping.ts";
+import { messageRecoveryKey } from "../chat-message-recovery.ts";
 import { resolveTurnRecap, type TurnRecap } from "../chat-progress.ts";
-import { readChatThreadMessageIdentity } from "../chat-thread-items.ts";
 import {
   assistantGroupCanOwnActiveRunStatus,
   agentRunFrameGroups,
@@ -21,11 +27,11 @@ import {
   coalesceActivityRuns,
   coalesceStreamRuns,
   collapseCompletedTurnWork,
-  deleteExpansionState,
   getExpansionStateVersion,
   getExpandedToolCards,
   getExpandedUserMessages,
   persistedMessageEntryId,
+  pruneAssistantMessageExpansions,
   setExpansionState,
   syncToolCardExpansionState,
 } from "../chat-thread.ts";
@@ -83,6 +89,26 @@ export function projectChatTranscript(
   const displayStream = props.stream ?? null;
   const sessionHost = props.sessionHost ?? null;
   const activeSession = props.selectedSession;
+  // Use unfiltered history and retained participants so searching or paging away
+  // another person's messages cannot turn a shared conversation into a solo one.
+  const showOwnSenderName =
+    (activeSession?.expandedParticipants ?? activeSession?.participants ?? []).some(
+      ({ identity }) =>
+        identity.type !== "agent" && !(identity.type === "profile" && identity.id === props.userId),
+    ) ||
+    [...props.messages, ...(props.pendingInputs ?? []).map((input) => input.message)].some(
+      (message) => {
+        if (normalizeRoleForGrouping(resolveMessageRole(message)) !== "user") {
+          return false;
+        }
+        const sender = resolveMessageSender(
+          asOptionalRecord(asOptionalRecord(message)?.["__openclaw"]),
+        );
+        return Boolean(
+          sender && !(sender.identity?.type === "profile" && sender.identity.id === props.userId),
+        );
+      },
+    );
   const mediaPolicyKey = assistantMediaPolicyKey(activeSession, props.mediaPolicyEpoch);
   // Global-alias routing ignores the capped session list, which may omit the
   // canonical row. The scope gate keeps per-sender main threads direct.
@@ -107,6 +133,16 @@ export function projectChatTranscript(
   };
   const locale = i18n.getLocale();
   const searchFiltering = state.searchOpen && Boolean(state.searchQuery.trim());
+  const expandedAssistantMessages = transcript.expandedAssistantMessages;
+  const recoveryKey = (messageId: string) =>
+    messageRecoveryKey(props.fullMessageAgentId, messageId);
+  if (expandedAssistantMessages.size > 0) {
+    pruneAssistantMessageExpansions(expandedAssistantMessages, props.fullMessageAgentId, [
+      ...props.messages,
+      ...props.toolMessages,
+      ...(props.pendingInputs ?? []).map((input) => input.message),
+    ]);
+  }
   const chatItems = buildCachedChatItems({
     paneId: props.paneId,
     sessionKey: props.sessionKey,
@@ -140,6 +176,14 @@ export function projectChatTranscript(
     loading: props.loading,
     searchOpen: state.searchOpen,
     searchQuery: state.searchQuery,
+    messageRecovery:
+      searchFiltering && props.loadFullAssistantMessage
+        ? {
+            messages: expandedAssistantMessages,
+            revision: getExpansionStateVersion(expandedAssistantMessages),
+            agentId: props.fullMessageAgentId,
+          }
+        : undefined,
   });
   const workingIndicator = chatItems.find((item) => item.kind === "reading-indicator");
   const runOutputTokens = workingIndicator?.runId
@@ -154,27 +198,6 @@ export function projectChatTranscript(
   );
   const expandedToolCards = getExpandedToolCards(props.sessionKey);
   const expandedUserMessages = getExpandedUserMessages(props.sessionKey);
-  const expandedAssistantMessages = transcript.expandedAssistantMessages;
-  const recoveryKey = (messageId: string) => JSON.stringify([props.fullMessageAgentId, messageId]);
-  if (expandedAssistantMessages.size > 0) {
-    // Search and virtualization only hide rows. Prune against source history so
-    // a removed message retires its body/load without refetching hidden rows.
-    const retainedKeys = new Set(
-      [
-        ...props.messages,
-        ...props.toolMessages,
-        ...(props.pendingInputs ?? []).map((input) => input.message),
-      ]
-        .map((message) => readChatThreadMessageIdentity(message)?.id)
-        .filter((id): id is string => typeof id === "string")
-        .map(recoveryKey),
-    );
-    for (const key of expandedAssistantMessages.keys()) {
-      if (!retainedKeys.has(key)) {
-        deleteExpansionState(expandedAssistantMessages, key);
-      }
-    }
-  }
   const questionPrompts = new Map(
     (props.questionPrompts ?? []).map((prompt) => [prompt.id, prompt]),
   );
@@ -343,6 +366,7 @@ export function projectChatTranscript(
       mainKey: props.mainKey,
       userId: props.userId ?? null,
       userName: props.userName ?? null,
+      showOwnSenderName,
       userAvatar: props.userAvatar ?? null,
       onRetryQueuedMessage: props.onRetryQueuedMessage,
       onDiscardQueuedMessage: props.onDiscardQueuedMessage,
@@ -430,13 +454,14 @@ export function projectChatTranscript(
       if (!firstGroup) {
         return nothing;
       }
-      if (item.groups.length === 1) {
-        return renderMessageGroup(firstGroup, renderGroupOptions(firstGroup));
-      }
-      return renderActivityGroup(item.groups, renderGroupOptions(firstGroup));
+      return item.groups.length === 1
+        ? renderMessageGroup(firstGroup, renderGroupOptions(firstGroup))
+        : renderActivityGroup(item.groups, renderGroupOptions(firstGroup));
     }
     if (item.kind === "agent-run-frame") {
       return renderAgentRunFrame(item, {
+        basePath: props.basePath,
+        sessionPublicOrigin: props.sessionPublicOrigin,
         streamOptions: streamGroupOptions,
         renderGroupOptions,
         isWorkExpanded: (key) => expandedToolCards.get(key) ?? false,
@@ -539,7 +564,6 @@ export function projectChatTranscript(
       assistantName: props.assistantName,
       userId: props.userId,
       userName: props.userName,
-      userAvatar: props.userAvatar,
     });
     for (const group of groups) {
       for (const source of group.messages) {
@@ -649,8 +673,11 @@ export function projectChatTranscript(
     props.mainKey,
     props.userId,
     props.userName,
+    showOwnSenderName,
     props.userAvatar,
     props.resourceBasePath,
+    props.basePath,
+    props.sessionPublicOrigin,
     mediaPolicyKey,
     props.assistantAttachmentAuthToken,
     props.connectionEpoch,

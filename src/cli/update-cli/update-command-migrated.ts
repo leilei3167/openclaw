@@ -13,8 +13,8 @@ import {
 } from "../../infra/update-candidate-state.js";
 import { resolveUpdateFinalizationTimeoutMs } from "../../infra/update-finalization-budget.js";
 import type { UpdateRunStep } from "../../infra/update-run-record.js";
+import { isUpdateGatewayReadinessPending } from "../../infra/update-run-step.js";
 import { runUtf8CommandWithTimeout } from "../../process/exec.js";
-import { defaultRuntime } from "../../runtime.js";
 import type { OpenClawSchemaVersions } from "../../state/openclaw-schema-versions.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { CLI_NAME } from "../cli-name.js";
@@ -38,6 +38,7 @@ import {
   stripGatewayServiceMarkerEnv,
 } from "./update-command-service-env.js";
 import { createWindowsTaskAutoStartGuard } from "./update-command-service-maintenance.js";
+import { recordUpdatePackageCompletion } from "./update-command-terminal.js";
 
 export type { MigratedUpdateFinalizationResult } from "./update-command-migrated-types.js";
 
@@ -228,13 +229,16 @@ export async function continueMigratedUpdateInFreshProcess(
       ...(windowsRecovery ? { windowsTaskAutoStartSuspended: true } : {}),
       resultPath,
     };
-    const runChild = (grant?: UpdateCommandChildGrant, beforeInput?: (pid: number) => void) =>
+    const runChild = (
+      grant?: UpdateCommandChildGrant,
+      bindChild?: (pid: number, argv?: readonly string[]) => void,
+    ) =>
       runUtf8CommandWithTimeout(workerCommand, {
         cwd: root,
         baseEnv: {},
         env: workerEnv,
         input: JSON.stringify({ ...input, ...(grant ? { executor: grant } : {}) }),
-        beforeInput,
+        beforeInput: bindChild,
         // This continuation includes bounded plugin steps as well as service
         // verification; the whole-process bound must exceed one step's budget.
         timeoutMs: run.activationTimeoutMs,
@@ -269,7 +273,9 @@ export async function continueMigratedUpdateInFreshProcess(
       );
     }
     try {
-      await windowsRecovery?.complete(response.result.status === "ok");
+      await windowsRecovery?.complete(
+        response.result.status === "ok" || isUpdateGatewayReadinessPending(response.result),
+      );
     } catch (cause) {
       throw new UpdateCommandFailure(
         response.result,
@@ -278,15 +284,13 @@ export async function continueMigratedUpdateInFreshProcess(
         { cause },
       );
     }
-    const retained = await params.packageTransaction
-      ?.complete({ activationVerified: response.result.status === "ok" }, assertCurrent)
-      .catch((error: unknown) => {
-        assertCurrent();
-        defaultRuntime.error(`Update backup cleanup failed: ${String(error)}`);
-      });
-    if (retained) {
-      response.result.steps.push(retained);
-      defaultRuntime.error(retained.stderrTail);
+    const cleanupFailure = await recordUpdatePackageCompletion(
+      params,
+      response.result,
+      assertCurrent,
+    );
+    if (cleanupFailure) {
+      throw cleanupFailure;
     }
     return {
       result: response.result,

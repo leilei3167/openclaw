@@ -226,9 +226,35 @@ expected version and Git build identity, checks channel readiness, and requires
 HTTP 200 from `/readyz`. Plugin activation or load failures remain named warnings
 when these core checks pass; they do not turn a successful core update into an error.
 
+Managed updates from 2026.9.3 can finish migration through the candidate runtime
+while the original updater retains installation ownership. The candidate checks
+the captured update identity against its live parent before finalizing either a
+Git or npm installation. This continuation does not change the recovery limits below.
+
 A candidate can be running while verification fails. Recovery guidance uses the
 latest observed service state and names the running version when known; an
 earlier activation stop does not mean the service remains stopped.
+
+When the readiness allowance expires for the same running PID or boot generation
+while the restart owner reports waiting for a listener, startup migration, or
+healthy settling, the updater records the elapsed wait and startup phase as a warning. It leaves the process starting, keeps readiness
+unconfirmed, and retains recovery backups. The run ends `skipped` with reason
+`gateway-readiness-unverified`, recording an intentional unverified outcome rather
+than success or an indefinite pending run. Observed PID or boot-generation changes
+remain failures and enter recovery. Check `openclaw gateway status --deep`
+before retiring those backups. A timeout alone does not authorize a recovery
+restart or rollback; a refused rollback also leaves the candidate untouched.
+A running status alone, a failed probe on an established listener, or an HTTP
+`/readyz` failure does not establish startup progress. Those unhealthy-service
+observations and concrete version, build, channel, or stopped-service failures
+remain failures with their own diagnostics. Doctor reports a qualifying startup
+timeout explicitly as `gateway-readiness-unverified`, including after migrated
+finalization, and tells the operator that readiness remains unconfirmed.
+
+This warning handling belongs to the updater already running. The published
+2026.9.3 and 2026.9.4 parents cannot distinguish pending readiness from verified
+success when completing a migrated update, so candidate-only updates cannot
+change their backup-retirement and Windows autostart decisions.
 
 Plugin packages download and sync against the installed target before the managed
 Gateway restarts. The service remains stopped through channel/config writes,
@@ -483,7 +509,7 @@ the sentinel.
 
 <Steps>
   <Step title="Verify clean worktree">
-    Requires no uncommitted changes.
+    Requires no uncommitted changes. Local edits fail the clean check before installation or service shutdown; the checkout is preserved. Commit your changes and retry, or run `openclaw triage` for help.
   </Step>
   <Step title="Resolve the target">
     Selects the channel's tag or branch and fetches upstream as needed. If the resolved target SHA equals `HEAD`, finishes `skipped` with reason `already-current` before staging or stopping the service.
