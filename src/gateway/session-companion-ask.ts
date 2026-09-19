@@ -14,10 +14,7 @@ import { redactToolPayloadText } from "../logging/redact.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import type { SessionCompanionContextReader } from "./session-companion-context.js";
-import {
-  buildSessionCompanionRunConfig,
-  SESSION_COMPANION_TOOLS,
-} from "./session-companion-policy.js";
+import { SESSION_COMPANION_TOOLS } from "./session-companion-policy.js";
 import {
   trimSessionCompanionExchanges,
   type SessionCompanionThread,
@@ -49,6 +46,7 @@ type SessionCompanionRunParams = {
   workspaceDir: string;
   systemPrompt: string;
   messages: SessionCompanionPromptMessage[];
+  assertSourceCurrent?: () => void;
   signal: AbortSignal;
 };
 
@@ -149,6 +147,7 @@ function toRunnerHistoryMessage(
 }
 
 async function defaultRun(params: SessionCompanionRunParams): Promise<string> {
+  params.assertSourceCurrent?.();
   const selection = resolveSimpleCompletionSelectionForAgent({
     cfg: params.cfg,
     agentId: params.agentId,
@@ -184,6 +183,7 @@ async function defaultRun(params: SessionCompanionRunParams): Promise<string> {
     runId,
     params.agentId,
     "session-companion.ask",
+    params.assertSourceCurrent,
   );
   try {
     const [{ SessionManager }, { runEmbeddedAgent }] = await Promise.all([
@@ -193,6 +193,7 @@ async function defaultRun(params: SessionCompanionRunParams): Promise<string> {
     const sessionManager = SessionManager.open(target);
     await withSessionManagerWrite(sessionManager, () => {
       params.signal.throwIfAborted();
+      params.assertSourceCurrent?.();
       const currentEntry = loadExactSessionEntry(target)?.entry;
       if (
         !currentEntry ||
@@ -218,7 +219,12 @@ async function defaultRun(params: SessionCompanionRunParams): Promise<string> {
       trigger: "manual",
       workspaceDir: params.workspaceDir,
       cwd: params.workspaceDir,
-      config: buildSessionCompanionRunConfig(params.cfg),
+      config: params.cfg,
+      // Invocation restrictions survive configured-runtime admission and reload.
+      // The internal execution session must not become the session-read target.
+      disableToolSearch: true,
+      requireWorkspaceOnly: true,
+      sessionReadScopeKey: params.sessionKey,
       codeModeOverride: false,
       prompt: current.content,
       provider: selection.runtimeProvider ?? selection.provider,
@@ -403,6 +409,7 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
     sessionKey: string,
     agentId: string,
     signal: AbortSignal,
+    assertSourceCurrent?: () => void,
   ): Promise<SessionCompanionThread> => {
     const threadKey = sessionObserverScopeKey(sessionKey, agentId);
     const existing = params.threads.get(threadKey);
@@ -410,6 +417,7 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
     if (signal.aborted) {
       throw new Error("session companion preparation was cancelled");
     }
+    assertSourceCurrent?.();
     if (existing && currentSessionId(sessionKey, agentId) === existing.context.sessionId) {
       return existing;
     }
@@ -420,6 +428,7 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
     if (signal.aborted || params.isDisposed()) {
       throw new Error("session companion preparation was cancelled");
     }
+    assertSourceCurrent?.();
     if (result.kind === "missing") {
       throw contextError("session-missing", "The selected session is no longer available.");
     }
@@ -452,6 +461,7 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
     sessionKey: string;
     question: string;
     connId: string;
+    assertSourceCurrent?: () => void;
     signal?: AbortSignal;
   }): Promise<{ answer: string; ts: number }> => {
     const sessionKey = request.sessionKey.trim();
@@ -460,6 +470,7 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
     if (!sessionKey || !agentId || !question || params.isDisposed() || request.signal?.aborted) {
       throw new SessionCompanionAskError("unavailable", "Side chat is unavailable.");
     }
+    request.assertSourceCurrent?.();
     const threadKey = sessionObserverScopeKey(sessionKey, agentId);
     const existing = params.threads.get(threadKey);
     if (existing?.busy || activeAsks.has(threadKey)) {
@@ -531,7 +542,12 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
     // Preparation shares the model's cancellation race. Late completions must
     // still pass the ownership checks before dispatching or committing an answer.
     const execute = async () => {
-      const thread = await prepareThread(sessionKey, agentId, controller.signal);
+      const thread = await prepareThread(
+        sessionKey,
+        agentId,
+        controller.signal,
+        request.assertSourceCurrent,
+      );
       ownedThread = thread;
       if (controller.signal.aborted) {
         throw new Error("session companion preparation was cancelled");
@@ -570,6 +586,7 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
         referenceContext,
         now: admittedAt,
       });
+      request.assertSourceCurrent?.();
       const rawAnswer = await run({
         cfg,
         agentId,
@@ -578,11 +595,13 @@ export function createSessionCompanionAskRuntime(params: SessionCompanionAskRunt
         workspaceDir,
         systemPrompt: buildSystemPrompt(sessionKey),
         messages,
+        assertSourceCurrent: request.assertSourceCurrent,
         signal: controller.signal,
       });
       if (activeAsk.cancellation || params.isDisposed()) {
         throw new Error("session companion ask was cancelled");
       }
+      request.assertSourceCurrent?.();
       if (
         params.threads.get(threadKey) !== thread ||
         currentSessionId(sessionKey, agentId) !== thread.context.sessionId

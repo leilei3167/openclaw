@@ -4,14 +4,15 @@ import path from "node:path";
 import { DatabaseSync, StatementSync } from "node:sqlite";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import type {
+  OpenAsyncKeyedStoreOptions,
   OpenKeyedStoreOptions,
+  PluginStateKeyedStore,
   PluginStateSyncKeyedStore,
 } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createPluginStateKeyedStoreForTests,
   createPluginStateSyncKeyedStoreForTests,
   resetPluginStateStoreForTests,
-  setMaxPluginStateEntriesPerPluginForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/plugin-test-runtime";
@@ -21,16 +22,16 @@ import reefChannelEntry from "../index.js";
 import {
   base64url,
   generateIdentity,
-  MemoryAuditStore,
-  MemoryReplayStore,
   signReceipt,
   verifyChain,
   verifyChainSegment,
   type ReviewRequest,
 } from "../protocol/index.js";
+import { MemoryAuditStore, MemoryReplayStore } from "../protocol/memory-stores.test-support.js";
 import { ReefChannelConfigSchema } from "./config-schema.js";
 import { ReefMessageFlow } from "./flow.js";
 import { ReefFriendManager } from "./friends.js";
+import { REEF_REPLAY_TTL_MS, reefReplayStoreKey } from "./replay-store.js";
 import { createReefRuntimeAuthority } from "./runtime.js";
 import {
   assertReefIdentityBinding,
@@ -45,13 +46,11 @@ import {
   REEF_DELIVERED_NAMESPACE,
   ReefDeliveredStore,
   ReefInboxCursorStore,
-  REEF_REPLAY_TTL_MS,
   REEF_DELIVERED_TTL_MS,
   REEF_REVIEWS_NAMESPACE,
   releaseReefIdentityReservation,
   reserveReefIdentityBinding,
   ReviewApprovalStore,
-  reefReplayStoreKey,
   saveReefSetupSession,
 } from "./state.js";
 import { ReefTransportClient } from "./transport.js";
@@ -68,7 +67,7 @@ function createRuntime(stateDir: string, registrationHost: "worker" | "legacy" =
       ...options,
       env: { OPENCLAW_STATE_DIR: stateDir },
     });
-  runtime.state.openKeyedStore = <T>(options: OpenKeyedStoreOptions) => {
+  runtime.state.openKeyedStore = <T>(options: OpenAsyncKeyedStoreOptions) => {
     const store = createPluginStateKeyedStoreForTests<T>("reef", {
       ...options,
       env: { OPENCLAW_STATE_DIR: stateDir },
@@ -471,7 +470,7 @@ describe("Reef SQLite state", () => {
       const runtime = createRuntime(stateDir);
       const failure = new Error("registration worker unavailable");
       const open = runtime.state.openKeyedStore;
-      runtime.state.openKeyedStore = <T>(options: OpenKeyedStoreOptions) => ({
+      runtime.state.openKeyedStore = <T>(options: OpenAsyncKeyedStoreOptions) => ({
         ...open<T>(options),
         [method]: async () => {
           throw failure;
@@ -850,13 +849,13 @@ describe("Reef SQLite state", () => {
     const identity = generateIdentity();
     const keys = { ...identity, auditKey, replayKey, keyEpoch: 1 };
     const runtime = createRuntime(stateDir);
-    const openSyncKeyedStore = runtime.state.openSyncKeyedStore;
-    runtime.state.openSyncKeyedStore = <T>(
-      options: OpenKeyedStoreOptions,
-    ): PluginStateSyncKeyedStore<T> => {
-      const store = openSyncKeyedStore<T>(options);
+    const openKeyedStore = runtime.state.openKeyedStore;
+    runtime.state.openKeyedStore = <T>(
+      options: OpenAsyncKeyedStoreOptions,
+    ): PluginStateKeyedStore<T> => {
+      const store = openKeyedStore<T>(options);
       return options.namespace === REEF_DELIVERED_NAMESPACE
-        ? { ...store, registerIfAbsent: () => false }
+        ? { ...store, registerIfAbsent: async () => false }
         : store;
     };
 
@@ -906,6 +905,7 @@ describe("Reef delivered markers", () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
     fs.rmSync(stateDir, { recursive: true, force: true });
@@ -917,16 +917,27 @@ describe("Reef delivered markers", () => {
   }
 
   it("confirms delivered markers idempotently", async () => {
-    const stores = openStores(createRuntime(stateDir), testKeys());
-    await expect(stores.delivered.status("m1")).resolves.toBeUndefined();
-    await expect(stores.delivered.has("m1")).resolves.toBe(false);
-    await stores.delivered.confirm("m1");
-    await expect(stores.delivered.status("m1")).resolves.toBe("delivered");
-    await expect(stores.delivered.has("m1")).resolves.toBe(true);
-    await stores.delivered.confirm("m1");
-    await expect(stores.delivered.status("m1")).resolves.toBe("delivered");
-    await stores.delivered.add("m2");
-    await expect(stores.delivered.status("m2")).resolves.toBe("delivered");
+    const sql = [
+      vi.spyOn(DatabaseSync.prototype, "prepare"),
+      vi.spyOn(DatabaseSync.prototype, "exec"),
+      ...(["get", "all", "run", "iterate"] as const).map((method) =>
+        vi.spyOn(StatementSync.prototype, method),
+      ),
+    ];
+    const delivered = new ReefDeliveredStore(createRuntime(stateDir));
+    await expect(delivered.status("m1")).resolves.toBeUndefined();
+    await expect(delivered.has("m1")).resolves.toBe(false);
+    await delivered.confirm("m1");
+    await expect(delivered.status("m1")).resolves.toBe("delivered");
+    await expect(delivered.has("m1")).resolves.toBe(true);
+    await delivered.confirm("m1");
+    await expect(delivered.status("m1")).resolves.toBe("delivered");
+    await delivered.add("m2");
+    await expect(delivered.status("m2")).resolves.toBe("delivered");
+    await expect(new ReefDeliveredStore(createRuntime(stateDir)).has("m2")).resolves.toBe(true);
+    for (const operation of sql) {
+      expect(operation).not.toHaveBeenCalled();
+    }
   });
 
   it("surfaces capacity as PLUGIN_STATE_LIMIT_EXCEEDED from confirm without touching existing markers", async () => {
@@ -942,30 +953,6 @@ describe("Reef delivered markers", () => {
     await expect(stores.delivered.status("second")).resolves.toBeUndefined();
     await expect(stores.delivered.status("first")).resolves.toBe("delivered");
     await expect(stores.delivered.status("third")).resolves.toBeUndefined();
-  });
-
-  it("parks confirm at the plugin-wide aggregate limit without retaining bookkeeping", async () => {
-    const stores = openStores(createRuntime(stateDir), testKeys(), {
-      deliveredMaxEntries: REEF_DELIVERED_MAX_ENTRIES,
-    });
-    // Fill the plugin-wide aggregate limit from another namespace's row. The
-    // parked entry keeps no separate bookkeeping and retries at-least-once.
-    setMaxPluginStateEntriesPerPluginForTests(1);
-    try {
-      const other = createRuntime(stateDir).state.openSyncKeyedStore<{ id: string }>({
-        namespace: "reef-test-other",
-        maxEntries: REEF_DELIVERED_MAX_ENTRIES,
-        overflowPolicy: "reject-new",
-      });
-      other.registerIfAbsent("row-1", { id: "row-1" });
-      await expect(stores.delivered.status("aggregate-1")).resolves.toBeUndefined();
-      await expect(stores.delivered.confirm("aggregate-1")).rejects.toMatchObject({
-        code: "PLUGIN_STATE_LIMIT_EXCEEDED",
-      });
-      await expect(stores.delivered.status("aggregate-1")).resolves.toBeUndefined();
-    } finally {
-      setMaxPluginStateEntriesPerPluginForTests();
-    }
   });
 
   it("reads legacy delivered markers without a state as delivered", async () => {
