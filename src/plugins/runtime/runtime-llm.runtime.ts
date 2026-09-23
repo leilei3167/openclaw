@@ -1,13 +1,6 @@
 // Runtime LLM helpers adapt plugin provider hooks into the core model runtime.
-import { asFiniteNumber, asFiniteNumberInRange } from "@openclaw/normalization-core";
+import { asFiniteNumberInRange } from "@openclaw/normalization-core";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import {
-  loadAuthProfileStoreForRuntimeAsync,
-  markAuthProfileFailure,
-  markAuthProfileSuccess,
-} from "../../agents/auth-profiles.js";
-import { classifyAssistantFailoverReason } from "../../agents/embedded-agent-helpers/assistant-message-failures.js";
-import { resolveAuthProfileFailureReason } from "../../agents/embedded-agent-runner/run/auth-profile-failure-policy.js";
 import { splitTrailingAuthProfile } from "../../agents/model-ref-profile.js";
 import { normalizeModelRef } from "../../agents/model-ref-shared.js";
 import type { UsageLike } from "../../agents/usage.js";
@@ -15,7 +8,6 @@ import { normalizeUsage } from "../../agents/usage.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { emitTrustedDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { markHostPluginUsageDiagnosticEvent } from "../../infra/diagnostic-plugin-usage-provenance.js";
-import type { Api, Message } from "../../llm/types.js";
 import { getChildLogger } from "../../logging.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { AsyncWorkScope, captureAsyncWorkTracker } from "../../shared/async-work-scope.js";
@@ -35,6 +27,7 @@ import {
   isIsolatedAgentRuntimeRequest,
   runIsolatedAgentRuntimeCompletion,
 } from "./runtime-llm-isolated.js";
+import { completeDirectProviderWithProfileFailover } from "./runtime-llm-profile-failover.js";
 import { writeRuntimeLog } from "./runtime-logging.js";
 import type {
   LlmCompleteCaller,
@@ -158,48 +151,6 @@ async function resolveAgentId(params: {
   }
   const { resolveAmbientOwnerAgentId } = await import("../../agents/agent-scope.js");
   return resolveAmbientOwnerAgentId(params.cfg);
-}
-
-function buildSystemPrompt(params: LlmCompleteParams): string | undefined {
-  const segments = [
-    normalizeOptionalString(params.systemPrompt),
-    ...params.messages
-      .filter((message) => message.role === "system")
-      .map((message) => normalizeOptionalString(message.content)),
-  ].filter((segment): segment is string => Boolean(segment));
-  return segments.length > 0 ? segments.join("\n\n") : undefined;
-}
-
-function buildMessages(params: {
-  request: LlmCompleteParams;
-  provider: string;
-  model: string;
-  api: Api;
-}): Message[] {
-  const now = Date.now();
-  return params.request.messages
-    .filter((message) => message.role !== "system")
-    .map((message) =>
-      message.role === "user"
-        ? { role: "user" as const, content: message.content, timestamp: now }
-        : {
-            role: "assistant" as const,
-            content: [{ type: "text" as const, text: message.content }],
-            api: params.api,
-            provider: params.provider,
-            model: params.model,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-            stopReason: "stop" as const,
-            timestamp: now,
-          },
-    );
 }
 
 function readFiniteNonNegativeNumber(value: unknown): number | undefined {
@@ -614,165 +565,22 @@ export function createRuntimeLlm(
         const work = new AsyncWorkScope();
         try {
           callerResult.resolve(
-            await work.track(async () => {
-              const attemptedProfiles = new Set<string>();
-              let lastFailure: LlmCompleteResult | undefined;
-              let current = prepared;
-              let retryLease: typeof preparation | undefined;
-              try {
-                for (;;) {
-                  if (params.requiredAuthMode && current.auth.mode !== params.requiredAuthMode) {
-                    throw completionError(
-                      "LLM_COMPLETION_NOT_AUTHORIZED",
-                      "Plugin LLM completion selected a credential with the wrong authentication mode.",
-                    );
-                  }
-                  if (requestedModelProfile && current.auth.profileId !== requestedModelProfile) {
-                    throw completionError(
-                      "LLM_COMPLETION_NOT_AUTHORIZED",
-                      "Plugin LLM completion selected a different authentication profile.",
-                    );
-                  }
-
-                  const profileId = normalizeOptionalString(current.auth.profileId);
-                  if (lastFailure && (!profileId || attemptedProfiles.has(profileId))) {
-                    return lastFailure;
-                  }
-
-                  const context = {
-                    systemPrompt: buildSystemPrompt(params),
-                    messages: buildMessages({
-                      request: params,
-                      provider: current.model.provider,
-                      model: current.model.id,
-                      api: current.model.api,
-                    }),
-                  };
-
-                  const result = await completeWithPreparedSimpleCompletionModel({
-                    model: current.model,
-                    auth: current.auth,
-                    cfg,
-                    context,
-                    options: {
-                      maxTokens: asFiniteNumber(params.maxTokens),
-                      temperature: asFiniteNumber(params.temperature),
-                      ...(params.responseFormat !== undefined
-                        ? { responseFormat: params.responseFormat }
-                        : {}),
-                      ...(params.reasoning !== undefined ? { reasoning: params.reasoning } : {}),
-                      signal: params.signal,
-                    },
-                  });
-
-                  const text = result.content
-                    .filter((c): c is { type: "text"; text: string } => c.type === "text")
-                    .map((c) => c.text)
-                    .join("");
-                  const completed = finalizePluginLlmCompletion({
-                    cfg,
-                    hostPluginId: pluginPolicyId,
-                    // Provider failures resolve as messages; only visible successful output owns usage.
-                    suppressUsage:
-                      !text.trim() || !["stop", "length", "toolUse"].includes(result.stopReason),
-                    rawUsage: result.usage,
-                    logger,
-                    result: {
-                      text,
-                      provider: current.selection.provider,
-                      model: current.selection.modelId,
-                      responseModel: result.responseModel,
-                      stopReason: result.stopReason,
-                      agentId,
-                      execution: {
-                        mode: "direct-provider",
-                        owner: { kind: "provider", id: current.selection.provider },
-                      },
-                      audit,
-                    },
-                  });
-                  const succeeded = ["stop", "length", "toolUse"].includes(result.stopReason);
-                  if (succeeded || result.stopReason === "aborted" || params.signal?.aborted) {
-                    if (profileId && succeeded && !params.signal?.aborted) {
-                      try {
-                        const store = await loadAuthProfileStoreForRuntimeAsync(
-                          current.selection.agentDir,
-                        );
-                        await markAuthProfileSuccess({
-                          store,
-                          provider: current.selection.provider,
-                          profileId,
-                          agentDir: current.selection.agentDir,
-                        });
-                      } catch (error) {
-                        logger.warn("plugin llm auth profile success bookkeeping failed", {
-                          profileId,
-                          error: error instanceof Error ? error.message : String(error),
-                        });
-                      }
-                    }
-                    return completed;
-                  }
-
-                  lastFailure = completed;
-                  const failoverReason = classifyAssistantFailoverReason(result, {
-                    provider: current.model.provider,
-                  });
-                  const failureReason = resolveAuthProfileFailureReason({
-                    failoverReason,
-                    providerStarted: true,
-                  });
-                  if (profileId && failureReason) {
-                    try {
-                      const store = await loadAuthProfileStoreForRuntimeAsync(
-                        current.selection.agentDir,
-                      );
-                      await markAuthProfileFailure({
-                        store,
-                        profileId,
-                        reason: failureReason,
-                        cfg,
-                        agentDir: current.selection.agentDir,
-                        modelId: current.selection.modelId,
-                      });
-                    } catch (error) {
-                      logger.warn("plugin llm auth profile failure bookkeeping failed", {
-                        profileId,
-                        reason: failureReason,
-                        error: error instanceof Error ? error.message : String(error),
-                      });
-                      return completed;
-                    }
-                  }
-                  if (requestedModelProfile || !failureReason || !profileId) {
-                    return completed;
-                  }
-                  attemptedProfiles.add(profileId);
-
-                  const retry = await acquireSimpleCompletionModelForAgent({
-                    ...acquireParams,
-                    preferredProfile: undefined,
-                  });
-                  if ("error" in retry) {
-                    return lastFailure;
-                  }
-                  const retryProfileId = normalizeOptionalString(retry.auth.profileId);
-                  if (!retryProfileId || attemptedProfiles.has(retryProfileId)) {
-                    await retry[Symbol.asyncDispose]();
-                    return lastFailure;
-                  }
-                  if (retryLease) {
-                    await retryLease[Symbol.asyncDispose]();
-                  }
-                  retryLease = retry;
-                  current = retry;
-                }
-              } finally {
-                if (retryLease) {
-                  await retryLease[Symbol.asyncDispose]();
-                }
-              }
-            }),
+            await work.track(async () =>
+              completeDirectProviderWithProfileFailover({
+                request: params,
+                cfg,
+                agentId,
+                hostPluginId: pluginPolicyId,
+                acquireParams,
+                prepared,
+                requestedModelProfile,
+                audit,
+                logger,
+                finalizePluginLlmCompletion,
+                acquireSimpleCompletionModelForAgent,
+                completeWithPreparedSimpleCompletionModel,
+              }),
+            ),
           );
         } catch (error) {
           callerResult.reject(error);
