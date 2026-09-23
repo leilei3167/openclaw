@@ -22,11 +22,7 @@ import {
   type HistoryEntry,
 } from "openclaw/plugin-sdk/reply-history";
 import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
-import {
-  resolveAllowlistProviderRuntimeGroupPolicy,
-  resolveDefaultGroupPolicy,
-  warnMissingProviderGroupPolicyFallbackOnce,
-} from "openclaw/plugin-sdk/runtime-group-policy";
+import { warnMissingProviderGroupPolicyFallbackOnce } from "openclaw/plugin-sdk/runtime-group-policy";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
 import { resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { normalizeOptionalString, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -82,6 +78,7 @@ import {
 } from "./policy.js";
 import { resolveFeishuReasoningPreviewEnabled } from "./reasoning-preview.js";
 import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
+import { resolveFeishuRuntimeGroupPolicy } from "./runtime-group-policy.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { getMessageFeishu, listFeishuThreadMessages, sendMessageFeishu } from "./send.js";
 import { getFeishuSyntheticDirectPreDispatchTarget } from "./synthetic-event-target.js";
@@ -583,13 +580,10 @@ export async function handleFeishuMessage(params: {
       log(`feishu[${account.accountId}]: group ${ctx.chatId} is disabled`);
       return;
     }
-    const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
-    const { groupPolicy, providerMissingFallbackApplied } =
-      resolveAllowlistProviderRuntimeGroupPolicy({
-        providerConfigPresent: cfg.channels?.feishu !== undefined,
-        groupPolicy: feishuCfg?.groupPolicy,
-        defaultGroupPolicy,
-      });
+    const { groupPolicy, providerMissingFallbackApplied } = resolveFeishuRuntimeGroupPolicy({
+      cfg,
+      groupPolicy: feishuCfg?.groupPolicy,
+    });
     warnMissingProviderGroupPolicyFallbackOnce({
       providerMissingFallbackApplied,
       providerKey: "feishu",
