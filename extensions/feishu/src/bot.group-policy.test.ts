@@ -1,8 +1,8 @@
 // Feishu tests cover unset groupPolicy allowlist fallback for inbound admission.
 import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
+import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ClawdbotConfig, PluginRuntime } from "../runtime-api.js";
-import type { FeishuMessageEvent } from "./bot.js";
+import type { PluginRuntime } from "../runtime-api.js";
 import { handleFeishuMessage as handleFeishuMessageImpl } from "./bot.js";
 import { createFeishuTestConfig, createFeishuTestEvent } from "./bot.test-support.js";
 import { setFeishuRuntime } from "./runtime.js";
@@ -109,6 +109,7 @@ describe("handleFeishuMessage unset groupPolicy", () => {
         }),
       },
       inbound: {
+        ingress: createPluginRuntimeMock().channel.inbound.ingress,
         buildContext: buildChannelInboundEventContext,
         run: vi.fn(async (params: Parameters<PluginRuntime["channel"]["inbound"]["run"]>[0]) => {
           const input = await params.adapter.ingest(params.raw);
