@@ -7,14 +7,16 @@ import { stripInternalRuntimeScaffolding } from "./protocol-scaffolding.js";
 // Retained for the deprecated plugin-sdk/infra-runtime compatibility barrel.
 export { stripInternalRuntimeScaffolding };
 
-// A tag name ends at whitespace, `/`, or `>`; `<user@example.com>` is prose, not markup.
-// A `/` after the name may consume through `>` (`<users/id>`, `<https://…>`).
-// After whitespace: `name=value` or a closed WHATWG boolean name, in any
-// order (quoted and unquoted values are mutually exclusive so `<a !=` +
-// `"" !=` cannot explode). Arbitrary identifiers are not booleans; `and`
-// is not listed, so `attempts<max and backoffMs>0` stays prose.
-const HTML_TAG_RE =
-  /<\/?[a-z][a-z0-9_.:-]*(?:\/[^>]*|(?:\s+(?:[^\s"'>=/]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>=]+)|(?:checked|disabled|hidden|readonly|required|selected|multiple|open|autofocus|controls|autoplay|async|defer|loop|muted|default|inert|nomodule|novalidate|formnovalidate|playsinline|allowfullscreen|reversed|ismap|itemscope)(?=[\s/>])))+)?\s*\/?>/gi;
+// Known HTML elements admit arbitrary attributes, including bare custom names.
+// Quoted values stay whole so `>` inside an attribute cannot leak its suffix.
+const HTML_ELEMENT_RE =
+  /<\/?(?:a|abbr|acronym|address|applet|area|article|aside|audio|b|base|basefont|bdi|bdo|big|blockquote|body|br|button|canvas|caption|center|cite|code|col|colgroup|data|datalist|dd|del|details|dfn|dialog|dir|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|nav|noframes|noscript|object|ol|optgroup|option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|search|section|select|slot|small|source|span|strike|strong|style|sub|summary|sup|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|tt|u|ul|var|video|wbr)(?=[\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>/;
+// Other tag names require valued or known boolean attributes, not arbitrary prose.
+// Disjoint quoted/unquoted values avoid ambiguous backtracking; slash paths retain
+// their existing handling. `<user@example.com>` is not a tag.
+const OTHER_HTML_TAG_RE =
+  /<\/?[a-z][a-z0-9_.:-]*(?:\/[^>]*|(?:\s+(?:[^\s"'>=/]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>=]+)|(?:checked|disabled|hidden|readonly|required|selected|multiple|open|autofocus|controls|autoplay|async|defer|loop|muted|default|inert|nomodule|novalidate|formnovalidate|playsinline|allowfullscreen|reversed|ismap|itemscope)(?=[\s/>])))+)?\s*\/?>/;
+const HTML_TAG_RE = new RegExp(`${HTML_ELEMENT_RE.source}|${OTHER_HTML_TAG_RE.source}`, "gi");
 const LABELED_ANGLE_LINK_RE =
   /<(?:https?:\/\/|mailto:)[^<>\s|]+\|([^<>\r\n|]*[^<>\s|][^<>\r\n|]*)>/gi;
 const MAY_CONTAIN_MARKDOWN_CODE_RE = /[`~]|\t| {4}/;

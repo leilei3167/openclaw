@@ -334,7 +334,12 @@ describe("sanitizeForPlainText", () => {
     ["autofocus-after-value", '<input type="text" autofocus/>ready', "ready"],
     ["controls-after-value", '<video src="clip.mp4" controls/>play', "play"],
     ["autoplay-after-value", '<audio src="clip.mp3" autoplay/>now', "now"],
-  ])("strips remaining tags that use boolean attributes (%s)", (_name, input, expected) => {
+    ["bare-custom", "<span data-x>text</span>", "text"],
+    ["mixed-custom", "<div hidden data-id=1>text</div>", "\ntext\n"],
+    ["download", "<a href=x download>file</a>", "file"],
+    ["quoted-angle", '<span data-x title="a>b">text</span>', "text"],
+    ["custom-element-boolean", "<custom-element hidden>text</custom-element>", "text"],
+  ])("strips or converts tags with bare attributes (%s)", (_name, input, expected) => {
     expect(sanitizeForPlainText(input)).toBe(expected);
   });
 
