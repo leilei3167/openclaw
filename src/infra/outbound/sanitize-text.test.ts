@@ -319,6 +319,7 @@ describe("sanitizeForPlainText", () => {
     "x<3 && y>2",
     "1<2>0",
     "retry if attempts<3 and wait>5s",
+    "attempts<max and wait>5s",
     "重试次数<max 且等待>5秒",
     "🙂<limit and wait>5s",
   ])("preserves unspaced comparison prose in %s", (input) => {
@@ -339,8 +340,14 @@ describe("sanitizeForPlainText", () => {
     ["download", "<a href=x download>file</a>", "file"],
     ["quoted-angle", '<span data-x title="a>b">text</span>', "text"],
     ["custom-element-boolean", "<custom-element hidden>text</custom-element>", "text"],
+    ["custom-element-bare", "<custom-element data-x>text</custom-element>", "text"],
+    ["custom-element-empty", "<my-widget hidden>", ""],
   ])("strips or converts tags with bare attributes (%s)", (_name, input, expected) => {
     expect(sanitizeForPlainText(input)).toBe(expected);
+  });
+
+  it("retains existing stripping of an ambiguous hyphenated tag", () => {
+    expect(sanitizeForPlainText("range a<b-c>d")).toBe("range ad");
   });
 
   // --- mixed content ------------------------------------------------------

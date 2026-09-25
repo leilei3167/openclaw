@@ -7,10 +7,10 @@ import { stripInternalRuntimeScaffolding } from "./protocol-scaffolding.js";
 // Retained for the deprecated plugin-sdk/infra-runtime compatibility barrel.
 export { stripInternalRuntimeScaffolding };
 
-// Known HTML elements admit arbitrary attributes, including bare custom names.
+// Known HTML elements and hyphenated custom elements admit arbitrary attributes.
 // Quoted values stay whole so `>` inside an attribute cannot leak its suffix.
 const HTML_ELEMENT_RE =
-  /<\/?(?:a|abbr|acronym|address|applet|area|article|aside|audio|b|base|basefont|bdi|bdo|big|blockquote|body|br|button|canvas|caption|center|cite|code|col|colgroup|data|datalist|dd|del|details|dfn|dialog|dir|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|nav|noframes|noscript|object|ol|optgroup|option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|search|section|select|slot|small|source|span|strike|strong|style|sub|summary|sup|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|tt|u|ul|var|video|wbr)(?=[\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>/;
+  /<\/?(?:a|abbr|acronym|address|applet|area|article|aside|audio|b|base|basefont|bdi|bdo|big|blockquote|body|br|button|canvas|caption|center|cite|code|col|colgroup|data|datalist|dd|del|details|dfn|dialog|dir|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|nav|noframes|noscript|object|ol|optgroup|option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|search|section|select|slot|small|source|span|strike|strong|style|sub|summary|sup|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|tt|u|ul|var|video|wbr|[a-z][a-z0-9_.]*-[a-z0-9_.-]*)(?=[\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>/;
 // Other tag names require valued or known boolean attributes, not arbitrary prose.
 // Disjoint quoted/unquoted values avoid ambiguous backtracking; slash paths retain
 // their existing handling. `<user@example.com>` is not a tag.
