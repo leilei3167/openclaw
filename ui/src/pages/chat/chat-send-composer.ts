@@ -13,7 +13,8 @@ import {
   retainChatComposerMemoryFallback,
   type ChatComposerMemoryFallbackOwnership,
 } from "./chat-composer-memory-fallback.ts";
-import { excludeComposerAttachments, removeQueuedMessageWithoutReleasing } from "./chat-queue.ts";
+import { chatOutboxOwner } from "./chat-outbox-owner.ts";
+import { excludeComposerAttachments } from "./chat-queue.ts";
 import type { ChatComposerRecoveryOwner, ChatHost } from "./chat-send-contract.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import { chatAttachmentDraftSignature } from "./durable-composer-persistence.ts";
@@ -38,7 +39,7 @@ export function clearSubmittedComposerState(
   submittedDraft: string,
   submittedAttachments: ChatAttachment[],
   submittedMentions: readonly HumanMention[] | undefined,
-  preserveAnnotations = false,
+  retainAttachments: "none" | "annotations" | "all" = "none",
 ) {
   if (
     chatAttachmentDraftSignature(
@@ -53,11 +54,14 @@ export function clearSubmittedComposerState(
   }
   host.chatMessage = "";
   host.chatMentions = [];
-  host.chatAttachments = preserveAnnotations
-    ? host.chatAttachments.filter(
-        (attachment) => attachment.browserAnnotation || attachment.selectionAnnotation,
-      )
-    : [];
+  if (retainAttachments !== "all") {
+    host.chatAttachments =
+      retainAttachments === "annotations"
+        ? host.chatAttachments.filter(
+            (attachment) => attachment.browserAnnotation || attachment.selectionAnnotation,
+          )
+        : [];
+  }
   resetChatInputHistoryNavigation(host);
   return {
     previousAttachments: submittedAttachments,
@@ -338,7 +342,7 @@ export function cancelChatDelivery(
   snapshot: PendingComposerSnapshot,
 ): boolean {
   const plan = strictComposerRestore(host, snapshot);
-  const removed = removeQueuedMessageWithoutReleasing(host, item.id);
+  const removed = chatOutboxOwner(host).remove(host, item.id);
   if (!removed) {
     return false;
   }

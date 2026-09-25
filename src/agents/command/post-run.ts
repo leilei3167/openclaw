@@ -28,12 +28,12 @@ import { isHeartbeatLifecycleRunKind } from "../bootstrap-mode.js";
 import type { AcceptedCompactionSuccessor } from "../embedded-agent-runner/compaction-successor.js";
 import { buildMainSessionRecoveryClearPatch } from "../main-session-recovery/main-session-recovery-clear.js";
 import { persistPendingFinalDeliveryMarker } from "../pending-final-delivery-marker.js";
-import type { AgentRunSessionTarget } from "../run-session-target.js";
+import type { AgentRunSessionTarget } from "../run-session-target.types.js";
 import { throwAgentRunRestartAbortReason } from "../run-termination.js";
 import type { SessionMaintenanceRequest } from "../session-maintenance/run.js";
 import { persistAssistantTranscriptRepairRecord } from "./assistant-transcript-repair.js";
 import { persistAgentSession } from "./attempt-execution.shared.js";
-import type { deliverAgentCommandResult } from "./delivery.js";
+import type { AgentCommandDeliveryResult } from "./delivery-result.js";
 import { createCommandBudget } from "./maintenance-budget.js";
 import { createCommandMaintenanceFollowup } from "./maintenance.js";
 import type { PreparedAgentCommandExecution } from "./prepare.js";
@@ -72,6 +72,7 @@ export async function clearCommandRecoveryClaim(params: {
     const entry = sessionStore[sessionKey] ?? params.sessionEntry;
     if (entry?.restartRecoveryDeliveryRunId === runId) {
       await persistAgentSession({
+        agentId: params.prepared.sessionAgentId,
         sessionStore,
         sessionKey,
         storePath,
@@ -211,7 +212,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
   const isHeartbeatLifecycleRun = isHeartbeatLifecycleRunKind(params.opts.bootstrapContextRunKind);
   let sessionEntry = params.sessionEntry;
   let result = params.attempt.result;
-  let deliveryResult: Awaited<ReturnType<typeof deliverAgentCommandResult>>;
+  let deliveryResult: AgentCommandDeliveryResult;
   let hasResultError: boolean;
   let terminalError: string | undefined;
   let maintenanceRequest: SessionMaintenanceRequest | undefined;
@@ -258,6 +259,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
     if (sessionStore && sessionKey && !params.suppressVisibleSessionEffects) {
       const { updateSessionStoreAfterAgentRun } = await loadSessionStoreRuntime();
       await updateSessionStoreAfterAgentRun({
+        agentId: sessionAgentId,
         cfg,
         agentDir,
         sessionId: effectiveSessionId,
@@ -356,6 +358,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
 
     const payloads = result.payloads ?? [];
     const pendingFinalDeliveryMarker = await persistPendingFinalDeliveryMarker({
+      agentId: sessionAgentId,
       deliver: params.opts.deliver === true,
       sessionStore,
       sessionKey,
@@ -374,6 +377,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
         ? async (): Promise<SessionEntry | undefined> => {
             const { loadSessionEntryReadOnly } = await loadSessionStoreRuntime();
             const freshEntry = loadSessionEntryReadOnly({
+              agentId: sessionAgentId,
               storePath,
               sessionKey,
               readConsistency: "latest",
@@ -528,6 +532,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
       }
     }
 
+    await params.opts.beforeTerminalDelivery?.();
     const { deliverAgentCommandResult } = await loadDeliveryRuntime();
     const deliveryParams = {
       cfg,
@@ -543,11 +548,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
         params.opts.abortSignal?.throwIfAborted();
         assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
       },
-      onDeliveryResult: (
-        delivered: Parameters<
-          NonNullable<Parameters<typeof deliverAgentCommandResult>[0]["onDeliveryResult"]>
-        >[0],
-      ) => {
+      onDeliveryResult: (delivered: AgentCommandDeliveryResult) => {
         const deliveryStatus = delivered.deliveryStatus;
         const terminalDelivery = normalizeAgentRunTerminalDeliverySnapshot(
           deliveryStatus && {
@@ -607,6 +608,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
       if (clearOwnedPendingFinal || clearStaleTransportOnly || recoveryClaimEntry) {
         const now = Date.now();
         sessionEntry = await persistAgentSession({
+          agentId: sessionAgentId,
           sessionStore,
           sessionKey,
           storePath,

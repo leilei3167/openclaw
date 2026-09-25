@@ -14,7 +14,6 @@ import {
 import type { UserTurnOriginalInputCommit } from "../../sessions/user-turn-transcript.types.js";
 import { extractTextFromChatContent } from "../../shared/chat-content.js";
 import type { MentionInbox } from "../mention-inbox.types.js";
-import { loadSessionEntry } from "../session-utils.js";
 import { formatForLog } from "../ws-log.js";
 import { hasGatewayAdminScope } from "./chat-origin-routing.js";
 import { buildRestartSafeChatTranscriptState } from "./chat-restart-recovery.js";
@@ -28,7 +27,9 @@ import type { PreparedChatSendSession } from "./chat-send-session.js";
 import { gatewayClientSenderFields } from "./gateway-client-identity.js";
 import type { GatewayClient } from "./shared-types.js";
 
-export type GatewayChatUserTurnPersist = (options?: { contextFreeCommand?: true }) => Promise<void>;
+export type GatewayChatUserTurnPersist = (options?: {
+  contextFreeCommand?: true;
+}) => ReturnType<UserTurnTranscriptRecorder["persistFallback"]>;
 
 type GatewayChatUserTurnController = {
   baseInput: UserTurnInput;
@@ -71,6 +72,7 @@ export function createGatewayChatUserTurnController(params: {
     ...params.transcript,
     ...(request.goalOperation?.action === "resume" ? { display: false } : {}),
     text: request.rawMessage,
+    ...(request.workContext ? { workContext: request.workContext } : {}),
     ...(request.mentions ? { mentions: request.mentions } : {}),
     timestamp: session.now,
     idempotencyKey: sourceId,
@@ -140,21 +142,15 @@ export function createGatewayChatUserTurnController(params: {
     resolveInput: () => inputPromise,
     target: () => {
       // Retain only the current binding; transcript writers recheck it at commit.
-      const { storePath, entry } = loadSessionEntry(session.sessionKey, {
-        ...session.sessionLoadOptions,
-        clone: false,
-      });
-      const sessionId = (entry ?? admission.initialSessionEntry)?.sessionId;
-      if (!sessionId || sessionId !== admission.sessionBinding.sessionId) {
-        return undefined;
-      }
+      const target = session.sessionTarget;
+      const sessionId = admission.sessionBinding.sessionId;
       return {
         sessionId,
         expectedSessionId: sessionId,
         initialSessionEntry: admission.initialSessionEntry,
-        sessionKey: session.sessionKey,
+        sessionKey: target.storeKey,
         sessionEntry: undefined,
-        storePath,
+        storePath: target.storePath,
         agentId: session.agentId,
         config: session.cfg,
       };
@@ -256,7 +252,7 @@ export function createGatewayChatUserTurnController(params: {
     baseInput,
     persist,
     persistBestEffort: async (options) => {
-      await persist(options).catch(() => undefined);
+      return await persist(options).catch(() => undefined);
     },
     recorder,
     replyContextFieldsPromise,
