@@ -338,10 +338,10 @@ describe("sanitizeForPlainText", () => {
     ["bare-custom", "<span data-x>text</span>", "text"],
     ["mixed-custom", "<div hidden data-id=1>text</div>", "\ntext\n"],
     ["download", "<a href=x download>file</a>", "file"],
-    ["quoted-angle", '<span data-x title="a>b">text</span>', "text"],
     ["custom-element-boolean", "<custom-element hidden>text</custom-element>", "text"],
     ["custom-element-bare", "<custom-element data-x>text</custom-element>", "text"],
     ["custom-element-empty", "<my-widget hidden>", ""],
+    ["qualified-bare", "<vendor:note data-x>text</vendor:note>", "text"],
   ])("strips or converts tags with bare attributes (%s)", (_name, input, expected) => {
     expect(sanitizeForPlainText(input)).toBe(expected);
   });

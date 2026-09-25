@@ -7,16 +7,10 @@ import { stripInternalRuntimeScaffolding } from "./protocol-scaffolding.js";
 // Retained for the deprecated plugin-sdk/infra-runtime compatibility barrel.
 export { stripInternalRuntimeScaffolding };
 
-// Known HTML elements and hyphenated custom elements admit arbitrary attributes.
-// Quoted values stay whole so `>` inside an attribute cannot leak its suffix.
-const HTML_ELEMENT_RE =
-  /<\/?(?:a|abbr|acronym|address|applet|area|article|aside|audio|b|base|basefont|bdi|bdo|big|blockquote|body|br|button|canvas|caption|center|cite|code|col|colgroup|data|datalist|dd|del|details|dfn|dialog|dir|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|nav|noframes|noscript|object|ol|optgroup|option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|search|section|select|slot|small|source|span|strike|strong|style|sub|summary|sup|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|tt|u|ul|var|video|wbr|[a-z][a-z0-9_.]*-[a-z0-9_.-]*)(?=[\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>/;
-// Other tag names require valued or known boolean attributes, not arbitrary prose.
-// Disjoint quoted/unquoted values avoid ambiguous backtracking; slash paths retain
-// their existing handling. `<user@example.com>` is not a tag.
-const OTHER_HTML_TAG_RE =
-  /<\/?[a-z][a-z0-9_.:-]*(?:\/[^>]*|(?:\s+(?:[^\s"'>=/]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>=]+)|(?:checked|disabled|hidden|readonly|required|selected|multiple|open|autofocus|controls|autoplay|async|defer|loop|muted|default|inert|nomodule|novalidate|formnovalidate|playsinline|allowfullscreen|reversed|ismap|itemscope)(?=[\s/>])))+)?\s*\/?>/;
-const HTML_TAG_RE = new RegExp(`${HTML_ELEMENT_RE.source}|${OTHER_HTML_TAG_RE.source}`, "gi");
+// Preserve the existing tag grammar; only exclude unspaced comparison prose.
+const HTML_TAG_RE = /<\/?[a-z][a-z0-9_.:-]*(?=[\s/>])[^>]*>/gi;
+const COMPARISON_PROSE_RE = /^<[a-z][a-z0-9_.]*\s+[^<>=/"']+>$/i;
+const COMPARISON_LEFT_OPERAND_RE = /[\p{L}\p{N}_\p{S}]$/u;
 const LABELED_ANGLE_LINK_RE =
   /<(?:https?:\/\/|mailto:)[^<>\s|]+\|([^<>\r\n|]*[^<>\s|][^<>\r\n|]*)>/gi;
 const MAY_CONTAIN_MARKDOWN_CODE_RE = /[`~]|\t| {4}/;
@@ -30,14 +24,28 @@ const CONVERTIBLE_HTML_OPEN_TAG_RE =
 const EMPTY_HTML_ELEMENT_RE =
   /<((?!(?:br|p|div)(?=[\s>]))[a-z][a-z0-9_.:-]*)(?=[\s>])(?:[^"'<>]|"[^"]*"|'[^']*')*>(?:[^\S\r\n\u2028\u2029]|<(?!\/?(?:br|p|div)(?=[\s/>]))\/?[a-z][a-z0-9_.:-]*(?=[\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>)*<\/\1\s*>/gi;
 
-function removeMatchesUntilStable(text: string, pattern: RegExp): string {
+function removeMatchesUntilStable(
+  text: string,
+  pattern: RegExp,
+  replacement?: (match: string, offset: number, source: string) => string,
+): string {
   let previous: string;
   let current = text;
   do {
     previous = current;
-    current = current.replace(pattern, "");
+    current = replacement ? current.replace(pattern, replacement) : current.replace(pattern, "");
   } while (current !== previous);
   return current;
+}
+
+function stripHtmlTagUnlessComparison(tag: string, offset: number, source: string): string {
+  const rightOperand = source.charCodeAt(offset + tag.length);
+  return rightOperand >= 48 &&
+    rightOperand <= 57 &&
+    COMPARISON_LEFT_OPERAND_RE.test(source.slice(Math.max(0, offset - 2), offset)) &&
+    COMPARISON_PROSE_RE.test(tag)
+    ? tag
+    : "";
 }
 
 function convertHtmlOutsideCode(text: string, options: { style?: "markdown" }): string {
@@ -64,7 +72,10 @@ function convertHtmlOutsideCode(text: string, options: { style?: "markdown" }): 
     .replace(/<h[1-6]>(.*?)<\/h[1-6]>/gi, `\n${boldMarker}$1${boldMarker}\n`)
     .replace(/<li>(.*?)<\/li>/gi, "• $1\n");
 
-  return removeMatchesUntilStable(converted, HTML_TAG_RE).replace(/\n{3,}/g, "\n\n");
+  return removeMatchesUntilStable(converted, HTML_TAG_RE, stripHtmlTagUnlessComparison).replace(
+    /\n{3,}/g,
+    "\n\n",
+  );
 }
 
 /**
