@@ -137,6 +137,8 @@ describe("sanitizeForPlainText", () => {
   it("strips unknown/remaining tags", () => {
     expect(sanitizeForPlainText('<span class="x">text</span>')).toBe("text");
     expect(sanitizeForPlainText('<a href="https://example.com">link</a>')).toBe("link");
+    expect(sanitizeForPlainText("<script>alert(1)</script>")).toBe("alert(1)");
+    expect(sanitizeForPlainText("<img src=x onerror=alert(1)>visible")).toBe("visible");
   });
 
   it("strips colon- and dot-qualified tags", () => {
@@ -310,17 +312,17 @@ describe("sanitizeForPlainText", () => {
   });
 
   it.each([
-    [
-      "Guard the retry loop: only retry while attempts<max and backoffMs>0, otherwise give up.",
-      "Guard the retry loop: only retry while attempts<max and backoffMs>0, otherwise give up.",
-    ],
-    [
-      "Set the threshold so that latency<budget. Then verify the p99 stays flat, confirm the alert fires, and only after that raise concurrency>4.",
-      "Set the threshold so that latency<budget. Then verify the p99 stays flat, confirm the alert fires, and only after that raise concurrency>4.",
-    ],
-    ["Use timeout<300 and n>0 for the probe.", "Use timeout<300 and n>0 for the probe."],
-  ])("preserves unspaced comparison prose in %s", (input, expected) => {
-    expect(sanitizeForPlainText(input)).toBe(expected);
+    "Guard the retry loop: only retry while attempts<max and backoffMs>0, otherwise give up.",
+    "Set the threshold so that latency<budget. Then verify the p99 stays flat, confirm the alert fires, and only after that raise concurrency>4.",
+    "Use timeout<300 and n>0 for the probe.",
+    "a<b",
+    "x<3 && y>2",
+    "1<2>0",
+    "retry if attempts<3 and wait>5s",
+    "重试次数<max 且等待>5秒",
+    "🙂<limit and wait>5s",
+  ])("preserves unspaced comparison prose in %s", (input) => {
+    expect(sanitizeForPlainText(input)).toBe(input);
   });
 
   it.each([
