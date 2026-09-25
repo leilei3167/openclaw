@@ -322,6 +322,7 @@ describe("sanitizeForPlainText", () => {
     "attempts<max and wait>5s",
     "重试次数<max 且等待>5秒",
     "🙂<limit and wait>5s",
+    "Set latency<budget. Then check:\n\n```\nif (a<b) { return c>d; }\n```\n\nand confirm concurrency>4 is safe.",
   ])("preserves unspaced comparison prose in %s", (input) => {
     expect(sanitizeForPlainText(input)).toBe(input);
   });
@@ -342,12 +343,19 @@ describe("sanitizeForPlainText", () => {
     ["custom-element-bare", "<custom-element data-x>text</custom-element>", "text"],
     ["custom-element-empty", "<my-widget hidden>", ""],
     ["qualified-bare", "<vendor:note data-x>text</vendor:note>", "text"],
+    ["adjacent-numeric", "foo<span data-x>5</span>", "foo5"],
+    ["paired-clause", "foo<span and wait>5</span>", "foo5"],
+    ["void-numeric", "foo<img hidden>5", "foo5"],
+    ["multiple-bare-numeric", "foo<input disabled checked>5", "foo5"],
   ])("strips or converts tags with bare attributes (%s)", (_name, input, expected) => {
     expect(sanitizeForPlainText(input)).toBe(expected);
   });
 
-  it("retains existing stripping of an ambiguous hyphenated tag", () => {
-    expect(sanitizeForPlainText("range a<b-c>d")).toBe("range ad");
+  it.each([
+    ["range a<b-c>d", "range ad"],
+    ["attempts<max threshold>5s", "attempts5s"],
+  ])("retains existing stripping of ambiguous markup in %s", (input, expected) => {
+    expect(sanitizeForPlainText(input)).toBe(expected);
   });
 
   // --- mixed content ------------------------------------------------------

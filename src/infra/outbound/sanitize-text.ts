@@ -9,8 +9,9 @@ export { stripInternalRuntimeScaffolding };
 
 // Preserve the existing tag grammar; only exclude unspaced comparison prose.
 const HTML_TAG_RE = /<\/?[a-z][a-z0-9_.:-]*(?=[\s/>])[^>]*>/gi;
-const COMPARISON_PROSE_RE = /^<[a-z][a-z0-9_.]*\s+[^<>=/"']+>$/i;
+const COMPARISON_PROSE_RE = /^<([a-z][a-z0-9_.]*)\s+[^<>=/"']+>$/i;
 const COMPARISON_LEFT_OPERAND_RE = /[\p{L}\p{N}_\p{S}]$/u;
+const COMPARISON_CLAUSE_RE = /\b(?:and|or)\s|[.!?;:]\s|且/iu;
 const LABELED_ANGLE_LINK_RE =
   /<(?:https?:\/\/|mailto:)[^<>\s|]+\|([^<>\r\n|]*[^<>\s|][^<>\r\n|]*)>/gi;
 const MAY_CONTAIN_MARKDOWN_CODE_RE = /[`~]|\t| {4}/;
@@ -38,12 +39,23 @@ function removeMatchesUntilStable(
   return current;
 }
 
-function stripHtmlTagUnlessComparison(tag: string, offset: number, source: string): string {
+function stripHtmlTagUnlessComparison(
+  tag: string,
+  offset: number,
+  source: string,
+  closingTagNames: ReadonlySet<string>,
+): string {
   const rightOperand = source.charCodeAt(offset + tag.length);
-  return rightOperand >= 48 &&
-    rightOperand <= 57 &&
-    COMPARISON_LEFT_OPERAND_RE.test(source.slice(Math.max(0, offset - 2), offset)) &&
-    COMPARISON_PROSE_RE.test(tag)
+  if (
+    !(rightOperand >= 48 && rightOperand <= 57) ||
+    !COMPARISON_LEFT_OPERAND_RE.test(source.slice(Math.max(0, offset - 2), offset))
+  ) {
+    return "";
+  }
+  const comparison = COMPARISON_PROSE_RE.exec(tag);
+  return comparison &&
+    COMPARISON_CLAUSE_RE.test(tag) &&
+    !closingTagNames.has(comparison[1].toLowerCase())
     ? tag
     : "";
 }
@@ -72,10 +84,14 @@ function convertHtmlOutsideCode(text: string, options: { style?: "markdown" }): 
     .replace(/<h[1-6]>(.*?)<\/h[1-6]>/gi, `\n${boldMarker}$1${boldMarker}\n`)
     .replace(/<li>(.*?)<\/li>/gi, "• $1\n");
 
-  return removeMatchesUntilStable(converted, HTML_TAG_RE, stripHtmlTagUnlessComparison).replace(
-    /\n{3,}/g,
-    "\n\n",
-  );
+  // A matching closer is positive markup evidence, even when its content is numeric.
+  const closingTagNames = new Set<string>();
+  for (const tag of converted.matchAll(/<\/([a-z][a-z0-9_.:-]*)\s*>/gi)) {
+    closingTagNames.add(tag[1].toLowerCase());
+  }
+  return removeMatchesUntilStable(converted, HTML_TAG_RE, (tag, offset, source) =>
+    stripHtmlTagUnlessComparison(tag, offset, source, closingTagNames),
+  ).replace(/\n{3,}/g, "\n\n");
 }
 
 /**
