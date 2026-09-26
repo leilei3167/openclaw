@@ -5,7 +5,6 @@
 import { randomUUID } from "node:crypto";
 import { embeddedAgentLog } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { coerceErrorMessage, toStringifiedError } from "openclaw/plugin-sdk/error-runtime";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { parse as parseSemver } from "semver";
 import type { CodexCatalogPreviewCache } from "../session-catalog-native-projection.js";
 import {
@@ -17,8 +16,12 @@ import {
   appendBoundedTail,
   buildCodexAppServerExitError,
   logCodexAppServerParseFailure,
+  observeCodexAppServerStderr,
 } from "./client-diagnostics.js";
-import { buildCodexAppServerInitializeParams } from "./client-initialize.js";
+import {
+  buildCodexAppServerInitializeParams,
+  buildCodexAppServerRuntimeIdentity,
+} from "./client-initialize.js";
 import { redactCodexAppServerLinePreview } from "./client-line-preview.js";
 import { CodexAppServerMessageDecoder } from "./client-message-decoder.js";
 import {
@@ -223,8 +226,8 @@ export class CodexAppServerClient {
   private readonly closeMessageReader: () => void;
   private readonly decoder = new CodexAppServerMessageDecoder(logCodexAppServerParseFailure);
   private readonly catalogWorker = new CodexCatalogWorker();
-  private catalogContinuation: CodexCatalogDecodeRoute | undefined;
   private catalogWorkerClosed: Promise<void> | undefined;
+  private serverRequestsClosed: Promise<void> | undefined;
   private readonly pending = new Map<number | string, CodexRequestAttempt>();
   private readonly catalogResponses = new WeakMap<
     CodexRequestAttempt,
@@ -264,7 +267,7 @@ export class CodexAppServerClient {
       child.stdout,
       (line) => {
         const route =
-          this.catalogContinuation ??
+          this.catalogWorker.continuation ??
           (this.decoder.hasPending ? undefined : readCodexCatalogDecodeRoute(line));
         if (route) {
           return this.decodeCatalogLine(line, route);
@@ -274,24 +277,17 @@ export class CodexAppServerClient {
       (error) => this.closeWithError(toStringifiedError(error)),
     );
     child.stdout.on("error", (error) => this.closeWithError(toStringifiedError(error)));
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
+    observeCodexAppServerStderr(child.stderr, (chunk) => {
       const text = this.redactPrivateStderr(chunk);
       this.stderrTail = appendBoundedTail(this.stderrTail, text, CODEX_APP_SERVER_STDERR_TAIL_MAX);
-      const trimmed = text.trim();
-      if (trimmed) {
-        embeddedAgentLog.debug(`codex app-server stderr: ${trimmed}`);
-      }
-    });
-    // Codex reserves stderr for diagnostics; losing that stream must not tear
-    // down an otherwise healthy JSON-RPC connection on stdout.
-    child.stderr.on("error", (error) => {
-      embeddedAgentLog.warn("codex app-server stderr stream failed", { error });
+      return text;
     });
     child.once("error", (error) => this.closeWithError(toStringifiedError(error)));
     child.once("exit", (code, signal) => {
       this.transportExited = true;
-      this.closeWithError(buildCodexAppServerExitError(code, signal, this.stderrTail));
+      this.closeWithError(
+        child.startupFailure?.error ?? buildCodexAppServerExitError(code, signal, this.stderrTail),
+      );
     });
     // Guard against unhandled EPIPE / write-after-close errors on the stdin
     // stream. When the child process terminates abruptly the pipe can break
@@ -328,10 +324,13 @@ export class CodexAppServerClient {
     } catch (error) {
       assertCurrent?.();
       if (client?.transportExited && hasCodexAppServerNaturalExit(client.child)) {
-        throw buildCodexAppServerExitError(
-          client.child.exitCode,
-          client.child.signalCode,
-          client.stderrTail,
+        throw (
+          client.child.startupFailure?.error ??
+          buildCodexAppServerExitError(
+            client.child.exitCode,
+            client.child.signalCode,
+            client.stderrTail,
+          )
         );
       }
       // Cleanup must not turn a live-child registration refusal into
@@ -358,6 +357,7 @@ export class CodexAppServerClient {
     // The handshake identifies the exact app-server process we will keep using,
     // which matters when callers override the binary or app-server args.
     const response = await this.request("initialize", buildCodexAppServerInitializeParams());
+    this.child.startupFailure?.complete();
     this.serverVersion = assertSupportedCodexAppServerVersion(response);
     this.runtimeIdentity = buildCodexAppServerRuntimeIdentity(response, this.serverVersion);
     this.notify("initialized");
@@ -805,11 +805,18 @@ export class CodexAppServerClient {
     this.markClosed(new Error("codex app-server client is closed"));
     const [result] = await Promise.all([
       closeCodexAppServerTransportAndWait(this.child, options),
-      this.catalogWorkerClosed,
+      this.waitForCloseWork(),
     ]);
     // Codex can discard terminal handles before OS cleanup. Later ancestry
     // containment cannot discharge a command whose descendants already reparented.
     return this.nativeExecutionObserved ? { ...result, cleanup: "uncertain" } : result;
+  }
+
+  /** Joins local settlement already started by close without changing transport policy. */
+  async waitForCloseWork(): Promise<void> {
+    // Refresh settlement must finish even if catalog cleanup has failed.
+    await this.serverRequestsClosed;
+    await this.catalogWorkerClosed;
   }
 
   /** Closes this transport and runs cleanup only after physical process exit. */
@@ -936,7 +943,6 @@ export class CodexAppServerClient {
     if (!decoded || this.closed) {
       return;
     }
-    this.catalogContinuation = decoded.pending ? route : undefined;
     for (const failure of decoded.failures) {
       logCodexAppServerParseFailure(failure.value, failure.error, failure.fragmentCount);
     }
@@ -1012,12 +1018,11 @@ export class CodexAppServerClient {
     this.closeError = error;
     this.closeMessageReader();
     this.decoder.clear();
-    this.catalogContinuation = undefined;
     this.catalogWorkerClosed = this.catalogWorker.close(error);
     void this.catalogWorkerClosed?.catch((closeError: unknown) => {
       embeddedAgentLog.warn("codex catalog worker shutdown failed", { error: closeError });
     });
-    this.serverRequests.close(error);
+    this.serverRequestsClosed = this.serverRequests.close(error);
     this.rejectPendingRequests(error);
     return true;
   }
@@ -1077,23 +1082,6 @@ function assertSupportedCodexAppServerVersion(response: CodexInitializeResponse)
 
 export function isUnsupportedCodexAppServerVersionError(error: unknown): boolean {
   return error instanceof CodexAppServerVersionError;
-}
-
-function buildCodexAppServerRuntimeIdentity(
-  response: CodexInitializeResponse,
-  serverVersion: string,
-): CodexAppServerRuntimeIdentity {
-  const userAgent = normalizeOptionalString(response.userAgent);
-  const codexHome = normalizeOptionalString(response.codexHome);
-  const platformFamily = normalizeOptionalString(response.platformFamily);
-  const platformOs = normalizeOptionalString(response.platformOs);
-  return {
-    serverVersion,
-    ...(userAgent ? { userAgent } : {}),
-    ...(codexHome ? { codexHome } : {}),
-    ...(platformFamily ? { platformFamily } : {}),
-    ...(platformOs ? { platformOs } : {}),
-  };
 }
 
 /** Extracts the Codex version from the app-server initialize user-agent field. */

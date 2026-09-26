@@ -11,6 +11,7 @@ import {
   logRejectedLargePayload,
   parseContentLengthHeader,
 } from "../logging/diagnostic-payload.js";
+import { retainGatewayRootWorkAdmissionContinuation } from "../process/gateway-work-admission.js";
 import type { GatewayAuthResult } from "./auth.js";
 import { respondPlainText } from "./control-ui-http-utils.js";
 import { readJsonBody } from "./hooks.js";
@@ -67,6 +68,10 @@ export function sendMethodNotAllowed(res: ServerResponse, allow = "POST") {
 }
 
 export function sendUnauthorized(res: ServerResponse) {
+  if (res.headersSent || res.writableEnded || res.destroyed) {
+    return finishFailedGatewayHttpResponse(res);
+  }
+  res.removeHeader("Set-Cookie");
   sendJson(res, 401, {
     error: { message: "Unauthorized", type: "unauthorized" },
   });
@@ -125,7 +130,8 @@ export function parseGatewayJsonRequest<T extends z.ZodType>(
   return undefined;
 }
 
-function buildMissingScopeForbiddenBody(
+export function sendMissingScopeForbidden(
+  res: ServerResponse,
   missingScope: string | undefined,
   requiredScopes?: readonly string[],
 ) {
@@ -136,22 +142,14 @@ function buildMissingScopeForbiddenBody(
           requiredScopes: requiredScopes ?? [missingScope],
         })
       : undefined;
-  return {
+  sendJson(res, 403, {
     ok: false,
     error: {
       type: "forbidden",
       message: `missing scope: ${missingScope}`,
       ...(details ? { details } : {}),
     },
-  };
-}
-
-export function sendMissingScopeForbidden(
-  res: ServerResponse,
-  missingScope: string | undefined,
-  requiredScopes?: readonly string[],
-) {
-  sendJson(res, 403, buildMissingScopeForbiddenBody(missingScope, requiredScopes));
+  });
 }
 
 export async function readJsonBodyOrError(
@@ -204,6 +202,19 @@ export function setSseHeaders(res: ServerResponse) {
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
+}
+
+/** Deferred delivery retains request admission independently of agent settlement. */
+export function retainGatewayHttpResponseWork(res: ServerResponse): () => void {
+  const releaseRootWork = retainGatewayRootWorkAdmissionContinuation();
+  const release = () => {
+    res.off("finish", release);
+    res.off("close", release);
+    releaseRootWork?.();
+  };
+  res.once("finish", release);
+  res.once("close", release);
+  return release;
 }
 
 /** Abort reason used when the HTTP client disconnects before delivery. */

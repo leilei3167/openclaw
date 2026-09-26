@@ -14,9 +14,11 @@ import {
 } from "../../packages/gateway-protocol/src/index.js";
 import { updateSessionProfileInvolvement } from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { GatewayScheduler, GatewayScheduledJob } from "../infra/gateway-scheduler.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { isIncognitoSessionKey } from "../routing/session-key.js";
 import { onSessionIdentityMutation } from "../sessions/session-lifecycle-events.js";
+import { sessionChanges } from "../sessions/session-row-changes.js";
 import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
 import { onUserProfilesChanged, readUserProfileVersion } from "../state/user-profile-events.js";
 import { createHumanMentionPolicy, humanMentionDisplayLabel } from "./human-mention-policy.js";
@@ -63,14 +65,21 @@ type MentionNotification = {
   isCurrent: () => boolean;
 };
 
+type SharingTargets = Map<
+  string,
+  { sessionKey: string; target: ReturnType<typeof resolveSessionSharingTarget> }
+>;
+
 /** Durable sources own retention and replay; each Gateway keeps disposable projection indexes. */
 export function createMentionInbox(params: {
+  scheduler: GatewayScheduler;
   gatewayInstanceId: string;
   getRuntimeConfig: () => OpenClawConfig;
   getClients: () => Iterable<GatewayClient>;
   broadcastToConnIds: GatewayBroadcastToConnIdsFn;
   onMentionCreated?: (notification: MentionNotification) => void;
 }): MentionInbox {
+  const { scheduler } = params;
   const policy = createHumanMentionPolicy(params);
   const items = new Map<string, StoredMention>();
   const itemsByProfile = new Map<string, Set<StoredMention>>();
@@ -78,9 +87,12 @@ export function createMentionInbox(params: {
   const dirtySources = new Set<string>();
   let head: MentionStoreHead = { revision: -1, nextSequence: 0 };
   const views = new WeakMap<GatewayClient, { signature: string; revision: number }>();
+  const connectedTargets: SharingTargets = new Map();
+  let targetConfig: OpenClawConfig | undefined;
   let active = true;
   let profileVersion = readUserProfileVersion();
-  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  let expiryJob: GatewayScheduledJob | undefined;
+  let expiryDeadlineAt: number | undefined;
   let capacityReported = false;
   let profileInvalidationPending = false;
   let nextExpiryAt = Infinity;
@@ -166,7 +178,8 @@ export function createMentionInbox(params: {
 
   function maintain(): boolean {
     const changed = synchronize();
-    const maintenance = Date.now() >= nextExpiryAt || profileVersion !== readUserProfileVersion();
+    const maintenance =
+      scheduler.now() >= nextExpiryAt || profileVersion !== readUserProfileVersion();
     if (maintenance) {
       mutate(() => undefined);
     }
@@ -207,7 +220,7 @@ export function createMentionInbox(params: {
   }
 
   function expireItems(): boolean {
-    const now = Date.now();
+    const now = scheduler.now();
     // Retention is bounded, but scanning it on every read and delivery makes a burst quadratic.
     if (now < nextExpiryAt) {
       return false;
@@ -271,25 +284,24 @@ export function createMentionInbox(params: {
     }
   }
 
-  function currentTarget(
-    item: StoredMention,
-    cfg: OpenClawConfig,
-    targets?: Map<string, ReturnType<typeof resolveSessionSharingTarget>>,
-  ) {
+  function currentTarget(item: StoredMention, cfg: OpenClawConfig, targets?: SharingTargets) {
     const { source, message } = item;
     const { agentId, sessionKey, senderProfileId } = message.content;
-    if (!active || items.get(item.id) !== item || source.expiresAt <= Date.now()) {
+    if (!active || items.get(item.id) !== item || source.expiresAt <= scheduler.now()) {
       return undefined;
     }
     const key = JSON.stringify([agentId, sessionKey]);
-    let resolved = targets?.get(key);
+    let resolved = targets?.get(key)?.target;
     if (resolved === undefined) {
       resolved = resolveSessionSharingTarget({
         cfg,
         sessionKey,
         agentId,
       });
-      targets?.set(key, resolved);
+      if (targets?.size === MAX_GLOBAL_ITEMS) {
+        targets.clear();
+      }
+      targets?.set(key, { sessionKey, target: resolved });
     }
     if (!resolved || resolved.entry.sessionId !== message.sessionId) {
       return undefined;
@@ -333,6 +345,7 @@ export function createMentionInbox(params: {
     client: GatewayClient | null,
     cfg = params.getRuntimeConfig(),
     remember = true,
+    targets: SharingTargets = new Map(),
   ): Result<MentionsListResult, ErrorShape> {
     const identified = policy.identify(client, cfg);
     if (!identified.ok) {
@@ -340,7 +353,6 @@ export function createMentionInbox(params: {
     }
     const requester = identified.value;
     const visible: MentionInboxItem[] = [];
-    const targets = new Map<string, ReturnType<typeof resolveSessionSharingTarget>>();
     const profileItems = itemsByProfile.get(requester.profile.profileId);
     for (const item of [...(profileItems ?? [])].toReversed()) {
       const current = currentTarget(item, cfg, targets);
@@ -361,12 +373,16 @@ export function createMentionInbox(params: {
 
   function refreshConnectedViews(): void {
     const cfg = params.getRuntimeConfig();
+    if (targetConfig !== cfg) {
+      connectedTargets.clear();
+      targetConfig = cfg;
+    }
     for (const client of params.getClients()) {
       if (!client.connId) {
         continue;
       }
       const previous = views.get(client);
-      const result = readView(client, cfg);
+      const result = readView(client, cfg, true, connectedTargets);
       if (
         !result.ok ||
         (previous ? previous.revision === result.value.revision : result.value.items.length === 0)
@@ -382,17 +398,29 @@ export function createMentionInbox(params: {
   }
 
   function scheduleExpiry(retryAfterMs?: number): void {
-    if (expiryTimer || !active || (processed.size === 0 && retryAfterMs === undefined)) {
+    if (!active || (processed.size === 0 && retryAfterMs === undefined)) {
       return;
     }
-    expiryTimer = setTimeout(
-      () => {
-        expiryTimer = undefined;
+    // Preserve an armed retry; only an earlier durable expiry replaces its current wake.
+    if (
+      expiryJob &&
+      (retryAfterMs !== undefined ||
+        expiryDeadlineAt === undefined ||
+        nextExpiryAt >= expiryDeadlineAt)
+    ) {
+      return;
+    }
+    expiryJob?.cancel();
+    expiryDeadlineAt = retryAfterMs === undefined ? nextExpiryAt : undefined;
+    expiryJob = scheduler.schedule({
+      id: `mentions:expiry:${params.gatewayInstanceId}`,
+      ...(retryAfterMs === undefined ? { atMs: nextExpiryAt } : { delayMs: retryAfterMs }),
+      run: () => {
+        expiryJob = undefined;
+        expiryDeadlineAt = undefined;
         refresh();
       },
-      retryAfterMs ?? Math.max(1, nextExpiryAt - Date.now()),
-    );
-    expiryTimer.unref?.();
+    });
   }
 
   function refresh(): void {
@@ -410,10 +438,29 @@ export function createMentionInbox(params: {
     }
   }
 
-  function invalidate(): void {
+  function invalidateTargets(sessionKey?: string): void {
+    if (!sessionKey) {
+      connectedTargets.clear();
+      return;
+    }
+    for (const [key, cached] of connectedTargets) {
+      if (cached.sessionKey === sessionKey || cached.target?.storeKeys.includes(sessionKey)) {
+        connectedTargets.delete(key);
+      }
+    }
+  }
+
+  function invalidate(sessionKey?: string): void {
+    invalidateTargets(sessionKey);
     policy.invalidateDirectory();
     refresh();
   }
+
+  // Only connected-view refreshes retain targets across calls. Committed row publications
+  // invalidate them; direct reads and delayed push authority keep their fresh exact reads.
+  const stopRows = sessionChanges.subscribe((change) =>
+    invalidateTargets("sessionKey" in change ? change.sessionKey : undefined),
+  );
 
   // Profile writes publish after commit. The microtask also follows role-policy cache invalidation.
   const stopProfiles = onUserProfilesChanged(() => {
@@ -587,7 +634,7 @@ export function createMentionInbox(params: {
             }
             return [];
           }
-          const now = Date.now();
+          const now = scheduler.now();
           const source: ProcessedSource = {
             key: sourceKey,
             sequence: head.nextSequence++,
@@ -697,11 +744,12 @@ export function createMentionInbox(params: {
       active = false;
       stopProfiles();
       stopSessions();
+      stopRows();
+      connectedTargets.clear();
       policy.dispose();
-      if (expiryTimer) {
-        clearTimeout(expiryTimer);
-        expiryTimer = undefined;
-      }
+      expiryJob?.cancel();
+      expiryJob = undefined;
+      expiryDeadlineAt = undefined;
       items.clear();
       itemsByProfile.clear();
       processed.clear();

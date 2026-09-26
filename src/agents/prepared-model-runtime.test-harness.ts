@@ -1,7 +1,11 @@
-import { vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
-import type { OpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import {
+  createOpenClawTestState,
+  type OpenClawTestState,
+} from "../test-utils/openclaw-test-state.js";
 import { resolveUsableAgentCredentialModes } from "./agent-auth-credentials.js";
 import type { ModelCatalogSnapshot } from "./model-catalog.types.js";
 import {
@@ -86,10 +90,11 @@ const preparedModelRuntimeMocks = vi.hoisted(() => ({
       routeVariants: [],
     }),
   ),
+  catalogHookRows: new Map<string, Set<string>>(),
   runtimeSyntheticAuthProviderRefs: [] as string[],
-  resolveAgentEffectiveModelPrimary: vi.fn<
-    typeof import("./agent-scope.js").resolveAgentEffectiveModelPrimary
-  >(() => undefined),
+  resolveNativeModelPrimary: vi.fn<typeof import("./agent-scope.js").resolveNativeModelPrimary>(
+    () => undefined,
+  ),
   resolveAmbientCredentials: vi.fn((..._args: unknown[]) => ({})),
   resolveStaticCatalogModel: vi.fn<StaticCatalogResolver>(() => undefined),
   warn: vi.fn(),
@@ -144,7 +149,7 @@ vi.mock("./prepared-model-catalog-worker.js", () => ({
           modelCatalog: catalog,
           runtimeModels: new Map(),
           providerExpiries: new Map(),
-          configuredProviderModelIds: new Map(),
+          hookRows: preparedModelRuntimeMocks.catalogHookRows,
           configuredRuntimeModels: factoryArgs[0].agentFacts.configuredRuntimeModels,
         };
       },
@@ -237,7 +242,7 @@ const agentScopeMocks = vi.hoisted(() => ({
   resolveDefaultAgentId: () => "default",
   resolveAgentConfig: (config: { agents?: { list?: Array<{ id?: string }> } }, agentId: string) =>
     config.agents?.list?.find((entry) => entry.id === agentId),
-  resolveAgentEffectiveModelPrimary: preparedModelRuntimeMocks.resolveAgentEffectiveModelPrimary,
+  resolveNativeModelPrimary: preparedModelRuntimeMocks.resolveNativeModelPrimary,
   resolveAgentModelFallbacksOverride: () => undefined,
   resolveEffectiveModelFallbacks: () => undefined,
   resolveModelFallbackAvailability: () => ({
@@ -445,6 +450,36 @@ export function getPreparedModelRuntimeMocks(): typeof preparedModelRuntimeMocks
   return preparedModelRuntimeMocks;
 }
 
+export function usePreparedModelRuntimeHarness(
+  options: Parameters<typeof createOpenClawTestState>[0] = { label: "prepared-model-runtime" },
+  beforeCleanup?: () => void | Promise<void>,
+) {
+  let state: OpenClawTestState;
+  beforeEach(async () => {
+    state = await createOpenClawTestState(options);
+    await resetPreparedModelRuntimeHarness(state);
+  });
+  afterEach(async ({ task }) => {
+    // Suite-owned work must settle before the common owner resets runtime and removes its files.
+    await beforeCleanup?.();
+    await cleanupPreparedModelRuntimeHarness(state, task.result?.state === "fail");
+  });
+  return {
+    mocks: preparedModelRuntimeMocks,
+    agentInput<Config extends OpenClawConfig>(agentId: string, config: Config) {
+      return {
+        agentId,
+        config,
+        agentDir: state.agentDir(agentId),
+        inheritedAuthDir: state.agentDir("default"),
+      };
+    },
+    get state() {
+      return state;
+    },
+  };
+}
+
 export function getPreparedModelRuntimeTestApi(): PreparedModelRuntimeTestApi {
   return (globalThis as Record<PropertyKey, unknown>)[
     Symbol.for("openclaw.preparedModelRuntimeTestApi")
@@ -507,9 +542,8 @@ export async function resetPreparedModelRuntimeHarness(state: OpenClawTestState)
     routeVariants: [],
   });
   preparedModelRuntimeMocks.runtimeSyntheticAuthProviderRefs = [];
-  preparedModelRuntimeMocks.resolveAgentEffectiveModelPrimary
-    .mockReset()
-    .mockReturnValue(undefined);
+  preparedModelRuntimeMocks.catalogHookRows = new Map();
+  preparedModelRuntimeMocks.resolveNativeModelPrimary.mockReset().mockReturnValue(undefined);
   preparedModelRuntimeMocks.resolveAmbientCredentials.mockReset().mockReturnValue({});
   preparedModelRuntimeMocks.resolveStaticCatalogModel.mockReset().mockReturnValue(undefined);
   preparedModelRuntimeMocks.createStaticCatalogResolver

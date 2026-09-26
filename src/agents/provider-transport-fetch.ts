@@ -33,12 +33,6 @@ import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
 import {
-  containsSecretSentinel,
-  resolveSecretSentinel,
-  SECRET_SENTINEL_PATTERN,
-  swapSecretSentinelsInText,
-} from "../secrets/sentinel.js";
-import {
   ProviderHttpError,
   readResponseTextLimited,
   summarizeProviderTransportError,
@@ -53,6 +47,7 @@ import {
   resolveProviderRequestPolicyConfig,
 } from "./provider-request-config.js";
 import { getProviderTransportDispatcherPool } from "./provider-transport-dispatcher-pool.js";
+import { swapSecretSentinelsForEgress } from "./provider-transport-secret-egress.js";
 
 const DEFAULT_MAX_SDK_RETRY_WAIT_SECONDS = 60;
 const SLOW_MODEL_FETCH_MS = 1_000;
@@ -79,18 +74,14 @@ function hasReadableSseData(block: string): boolean {
     .some((line) => line.startsWith("data:") && line.slice("data:".length).trim().length > 0);
 }
 
-function findSseEventBoundary(buffer: string): { index: number; length: number } | undefined {
-  let best: { index: number; length: number } | undefined;
-  for (const delimiter of ["\r\n\r\n", "\n\n", "\r\r"]) {
-    const index = buffer.indexOf(delimiter);
-    if (index === -1) {
-      continue;
-    }
-    if (!best || index < best.index) {
-      best = { index, length: delimiter.length };
-    }
-  }
-  return best;
+function findSseEventBoundary(
+  buffer: string,
+  startIndex = 0,
+): { index: number; length: number } | undefined {
+  const delimiter = /\r\n\r\n|\n\n|\r\r/g;
+  delimiter.lastIndex = startIndex;
+  const match = delimiter.exec(buffer);
+  return match ? { index: match.index, length: match[0].length } : undefined;
 }
 
 async function cancelReaderBestEffort(
@@ -220,6 +211,7 @@ function sanitizeOpenAISdkSseResponse(
   const encoder = new TextEncoder();
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let buffer = "";
+  let scanOffset = 0;
 
   const enqueueSanitized = (
     controller: ReadableStreamDefaultController<Uint8Array>,
@@ -228,8 +220,10 @@ function sanitizeOpenAISdkSseResponse(
     let enqueued = 0;
     buffer += text;
     for (;;) {
-      const boundary = findSseEventBoundary(buffer);
+      const boundary = findSseEventBoundary(buffer, scanOffset);
       if (!boundary) {
+        // A delimiter can straddle chunks; only its last three characters need revisiting.
+        scanOffset = Math.max(0, buffer.length - 3);
         if (buffer.length > SSE_SANITIZE_BUFFER_MAX_CHARS) {
           throw new Error(
             `SSE response exceeded max buffer size (${SSE_SANITIZE_BUFFER_MAX_CHARS} chars) without event boundary`,
@@ -240,6 +234,7 @@ function sanitizeOpenAISdkSseResponse(
       const block = buffer.slice(0, boundary.index);
       const separator = buffer.slice(boundary.index, boundary.index + boundary.length);
       buffer = buffer.slice(boundary.index + boundary.length);
+      scanOffset = 0;
       // OpenAI's SDK currently tries to JSON.parse event-only or blank-data SSE
       // messages. Drop those malformed keepalive-style blocks before it parses.
       if (hasReadableSseData(block)) {
@@ -717,63 +712,6 @@ function withModelProviderNetworkRemediation(
       `models.providers.${params.providerId}.request.allowPrivateNetwork=true only for an ` +
       `operator-controlled endpoint. Original block: ${error.message}`,
   );
-}
-
-function headersContainSecretSentinel(headers: HeadersInit | undefined): boolean {
-  if (!headers) {
-    return false;
-  }
-  for (const value of new Headers(headers).values()) {
-    if (containsSecretSentinel(value)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function swapSecretSentinelsInUrl(url: string): { text: string; unknown: string[] } {
-  if (!containsSecretSentinel(url)) {
-    return { text: url, unknown: [] };
-  }
-  const unknown = new Set<string>();
-  const text = url.replace(new RegExp(SECRET_SENTINEL_PATTERN.source, "g"), (sentinel) => {
-    const value = resolveSecretSentinel(sentinel);
-    if (value === undefined) {
-      unknown.add(sentinel);
-      return sentinel;
-    }
-    // Sentinels are URL-safe placeholders. Encode the real bytes so query/path structure is stable.
-    return encodeURIComponent(value);
-  });
-  return { text, unknown: [...unknown] };
-}
-
-function swapSecretSentinelsForEgress(params: { url: string; headers?: HeadersInit }): {
-  url: string;
-  headers?: Headers;
-} {
-  if (!containsSecretSentinel(params.url) && !headersContainSecretSentinel(params.headers)) {
-    return { url: params.url };
-  }
-  const urlSwap = swapSecretSentinelsInUrl(params.url);
-  const headers = params.headers ? new Headers(params.headers) : undefined;
-  const unknown = new Set(urlSwap.unknown);
-  if (headers) {
-    for (const [name, value] of headers.entries()) {
-      const swapped = swapSecretSentinelsInText(value);
-      headers.set(name, swapped.text);
-      for (const sentinel of swapped.unknown) {
-        unknown.add(sentinel);
-      }
-    }
-  }
-  const unresolved = unknown.values().next().value;
-  if (unresolved) {
-    throw new Error(
-      `Secret sentinel ${unresolved} is not registered in this process; refusing to send request`,
-    );
-  }
-  return { url: urlSwap.text, ...(headers ? { headers } : {}) };
 }
 
 export function buildGuardedModelFetch(

@@ -15,7 +15,10 @@ import {
   tryBeginGatewaySuspendAdmission,
   tryBeginGatewayRootWorkAdmission,
 } from "../process/gateway-work-admission.js";
+import { getSpawnBroker, runWithSpawnBroker } from "../process/spawn-broker/context.js";
+import { useSpawnBrokerTestFixture } from "../process/spawn-broker/host.test-support.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { registerGatewayCronStartupTests } from "./server-runtime-services.cron.test-support.js";
 import {
   createLog,
@@ -36,6 +39,7 @@ const {
 } = await import("./server-runtime-services.js");
 
 describe("server-runtime-services", () => {
+  const createBroker = useSpawnBrokerTestFixture(afterEach);
   beforeEach(() => {
     vi.useRealTimers();
     // Gateway test helpers set these at module load. Stub them off so a shared
@@ -54,6 +58,7 @@ describe("server-runtime-services", () => {
 
   it("starts channel health without activating scheduled services", () => {
     startGatewayChannelHealthMonitor({
+      scheduler: createTestGatewayScheduler(),
       channelManager: {
         getRuntimeSnapshot: vi.fn(),
         isHealthMonitorEnabled: vi.fn(),
@@ -72,6 +77,7 @@ describe("server-runtime-services", () => {
     "keeps channel health recovery disabled when %s suppresses startup",
     (envKey) => {
       const monitor = startGatewayChannelHealthMonitor({
+        scheduler: createTestGatewayScheduler(),
         channelManager: {} as never,
         env: { [envKey]: "1" },
       });
@@ -87,6 +93,7 @@ describe("server-runtime-services", () => {
     vi.useFakeTimers();
     const warn = vi.fn();
     activateGatewayScheduledServices({
+      scheduler: createTestGatewayScheduler(),
       minimalTestGateway: false,
       cfgAtStart,
       deps: {} as never,
@@ -167,6 +174,7 @@ describe("server-runtime-services", () => {
         shouldContinue: expect.any(Function),
       },
       expect.any(Function),
+      expect.any(Object),
     );
     const runtimeParams = hoisted.startSessionDeliveryRuntime.mock.calls[0]?.[0];
     if (!runtimeParams) {
@@ -207,7 +215,8 @@ describe("server-runtime-services", () => {
     expect(hoisted.schedulePendingSessionDeliveries).toHaveBeenCalledTimes(1);
   });
 
-  it("gives standalone scheduled heartbeats a resolvable gateway context", async () => {
+  it("gives standalone scheduled heartbeats their owning Gateway context and broker", async () => {
+    const broker = await createBroker();
     vi.useFakeTimers();
     const gatewayContext = {
       terminalSessions: {},
@@ -217,14 +226,18 @@ describe("server-runtime-services", () => {
     const admittedOwner = {};
     let observed: unknown = "never-ran";
     let observedClient: unknown = "never-ran";
+    let observedBroker: unknown = "never-ran";
     hoisted.runHeartbeatOnce.mockImplementationOnce(async () => {
       const scope = getPluginRuntimeGatewayRequestScope();
       bindGatewayContextResolver(admittedOwner, scope?.resolveGatewayContext);
       observed = scope?.resolveGatewayContext?.();
       observedClient = scope?.client;
+      observedBroker = getSpawnBroker();
       return { status: "ran", durationMs: 1 };
     });
-    const { services } = activateScheduledServicesForTest({ resolveGatewayContext });
+    const { services } = runWithSpawnBroker(broker, () =>
+      activateScheduledServicesForTest({ resolveGatewayContext }),
+    );
     const runnerParams = hoisted.startHeartbeatRunner.mock.calls[0]?.[0] as
       | { runOnce?: (opts: never) => Promise<unknown> }
       | undefined;
@@ -235,9 +248,11 @@ describe("server-runtime-services", () => {
 
     expect(observed).toBe(gatewayContext);
     expect(observedClient).toBeUndefined();
+    expect(observedBroker).toBe(broker);
     expect(hasGatewayContextOwner(admittedOwner, resolveGatewayContext)).toBe(true);
     expect(hasGatewayContextOwner(admittedOwner, () => gatewayContext)).toBe(false);
     services.heartbeatRunner.stop();
+    vi.useRealTimers();
   });
 
   it("waits for active startup recovery before its stop handle settles", async () => {
@@ -645,6 +660,7 @@ describe("server-runtime-services", () => {
       expect(hoisted.drainPendingDeliveries).toHaveBeenCalledWith(
         expect.objectContaining({ cfg: reloadedConfig }),
         expect.any(Function),
+        expect.any(Object),
       );
       expect(runtimeConfig).toHaveBeenCalledOnce();
     } finally {
@@ -879,7 +895,6 @@ describe("server-runtime-services", () => {
     const applyMaintenance = vi.fn();
     const cron = { start: vi.fn(async () => undefined) };
     const recordPostReadyMemory = vi.fn();
-    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
 
     scheduleGatewayPostReadyMaintenance(
       createPostReadyMaintenanceScheduleParams({
@@ -906,18 +921,14 @@ describe("server-runtime-services", () => {
 
     expect(applyMaintenance).not.toHaveBeenCalled();
     expect(maintenance.startMediaCleanup).not.toHaveBeenCalled();
-    expect(maintenance.stopMediaCleanup).toHaveBeenCalledTimes(1);
+    expect(maintenance.stopPeriodicTasks).toHaveBeenCalledTimes(1);
     expect(cron.start).not.toHaveBeenCalled();
     expect(recordPostReadyMemory).not.toHaveBeenCalled();
-    expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.tickInterval);
-    expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.healthInterval);
-    expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.dedupeCleanup);
-    expect(maintenance.stopMediaCleanup).toHaveBeenCalledTimes(1);
-    expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.worktreeCleanup);
   });
 
   it("keeps scheduled services disabled for minimal test gateways", () => {
     const services = activateGatewayScheduledServices({
+      scheduler: createTestGatewayScheduler(),
       minimalTestGateway: true,
       cfgAtStart: {} as never,
       deps: {} as never,
@@ -941,6 +952,7 @@ function activateScheduledServicesForTest(
   const log = overrides.log ?? createLog();
   const cfgAtStart = overrides.cfgAtStart ?? ({} as never);
   const services = activateGatewayScheduledServices({
+    scheduler: createTestGatewayScheduler(),
     minimalTestGateway: false,
     cfgAtStart,
     deps: {} as never,
