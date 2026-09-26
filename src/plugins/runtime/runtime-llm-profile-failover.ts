@@ -9,44 +9,20 @@ import {
 } from "../../agents/auth-profiles.js";
 import { classifyAssistantFailoverReason } from "../../agents/embedded-agent-helpers/assistant-message-failures.js";
 import { resolveAuthProfileFailureReason } from "../../agents/embedded-agent-runner/run/auth-profile-failure-policy.js";
+import type {
+  acquireSimpleCompletionModelForAgent,
+  completeWithPreparedSimpleCompletionModel,
+} from "../../agents/simple-completion-runtime.js";
+import type { PrepareSimpleCompletionModelForAgentParams } from "../../agents/simple-completion.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { Api, Message } from "../../llm/types.js";
 import { createLlmCompleteError as completionError } from "./runtime-llm-error.js";
 import type { LlmCompleteParams, LlmCompleteResult, RuntimeLogger } from "./types-core.js";
 
-type PreparedAgentModel = {
-  selection: {
-    provider: string;
-    modelId: string;
-    agentDir: string;
-  };
-  model: {
-    provider: string;
-    id: string;
-    api: Api;
-  };
-  auth: {
-    mode: string;
-    profileId?: string;
-  };
-} & AsyncDisposable;
-
-type AcquirePreparedAgentModel = (
-  params: Record<string, unknown>,
-) => Promise<PreparedAgentModel | { error: string }>;
-
-type CompleteWithPreparedModel = (params: {
-  model: PreparedAgentModel["model"];
-  auth: PreparedAgentModel["auth"];
-  cfg: OpenClawConfig;
-  context: { systemPrompt?: string; messages: Message[] };
-  options: Record<string, unknown>;
-}) => Promise<{
-  content: Array<{ type: string; text?: string }>;
-  responseModel?: string;
-  stopReason: string;
-  usage?: unknown;
-}>;
+type AcquiredPreparedSimpleCompletionModel = Extract<
+  Awaited<ReturnType<typeof acquireSimpleCompletionModelForAgent>>,
+  { model: unknown }
+>;
 
 type FinalizePluginLlmCompletion = (params: {
   cfg: OpenClawConfig;
@@ -107,14 +83,14 @@ export async function completeDirectProviderWithProfileFailover(params: {
   cfg: OpenClawConfig;
   agentId: string;
   hostPluginId?: string;
-  acquireParams: Record<string, unknown>;
-  prepared: PreparedAgentModel;
+  acquireParams: PrepareSimpleCompletionModelForAgentParams;
+  prepared: AcquiredPreparedSimpleCompletionModel;
   requestedModelProfile?: string;
   audit: LlmCompleteResult["audit"];
   logger: RuntimeLogger;
   finalizePluginLlmCompletion: FinalizePluginLlmCompletion;
-  acquireSimpleCompletionModelForAgent: AcquirePreparedAgentModel;
-  completeWithPreparedSimpleCompletionModel: CompleteWithPreparedModel;
+  acquireSimpleCompletionModelForAgent: typeof acquireSimpleCompletionModelForAgent;
+  completeWithPreparedSimpleCompletionModel: typeof completeWithPreparedSimpleCompletionModel;
 }): Promise<LlmCompleteResult> {
   const {
     request,
@@ -130,7 +106,7 @@ export async function completeDirectProviderWithProfileFailover(params: {
   const attemptedProfiles = new Set<string>();
   let lastFailure: LlmCompleteResult | undefined;
   let current = params.prepared;
-  let retryLease: PreparedAgentModel | undefined;
+  let retryLease: AcquiredPreparedSimpleCompletionModel | undefined;
   try {
     for (;;) {
       if (request.requiredAuthMode && current.auth.mode !== request.requiredAuthMode) {
