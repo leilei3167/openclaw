@@ -347,6 +347,8 @@ describe("sanitizeForPlainText", () => {
     ["paired-clause", "foo<span and wait>5</span>", "foo5"],
     ["void-numeric", "foo<img hidden>5", "foo5"],
     ["multiple-bare-numeric", "foo<input disabled checked>5", "foo5"],
+    ["unpaired-clause", "foo<span and wait>5", "foo5"],
+    ["uppercase-unpaired-clause", "foo<SPAN and wait>5", "foo5"],
   ])("strips or converts tags with bare attributes (%s)", (_name, input, expected) => {
     expect(sanitizeForPlainText(input)).toBe(expected);
   });
@@ -354,6 +356,7 @@ describe("sanitizeForPlainText", () => {
   it.each([
     ["range a<b-c>d", "range ad"],
     ["attempts<max threshold>5s", "attempts5s"],
+    ["x<b and y>2", "x2"],
   ])("retains existing stripping of ambiguous markup in %s", (input, expected) => {
     expect(sanitizeForPlainText(input)).toBe(expected);
   });

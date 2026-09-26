@@ -12,6 +12,10 @@ const HTML_TAG_RE = /<\/?[a-z][a-z0-9_.:-]*(?=[\s/>])[^>]*>/gi;
 const COMPARISON_PROSE_RE = /^<([a-z][a-z0-9_.]*)\s+[^<>=/"']+>$/i;
 const COMPARISON_LEFT_OPERAND_RE = /[\p{L}\p{N}_\p{S}]$/u;
 const COMPARISON_CLAUSE_RE = /\b(?:and|or)\s|[.!?;:]\s|且/iu;
+// Standard HTML element names are never comparison operands: retain main's
+// stripping even beside numeric text or prose-like bare attributes.
+const HTML_ELEMENT_NAME_RE =
+  /^(?:a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|body|br|button|canvas|caption|cite|code|col|colgroup|data|datalist|dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|footer|form|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|nav|noscript|object|ol|optgroup|option|output|p|picture|pre|progress|q|rp|rt|ruby|s|samp|script|search|section|select|selectedcontent|slot|small|source|span|strong|style|sub|summary|sup|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|video|wbr)$/i;
 const LABELED_ANGLE_LINK_RE =
   /<(?:https?:\/\/|mailto:)[^<>\s|]+\|([^<>\r\n|]*[^<>\s|][^<>\r\n|]*)>/gi;
 const MAY_CONTAIN_MARKDOWN_CODE_RE = /[`~]|\t| {4}/;
@@ -54,6 +58,7 @@ function stripHtmlTagUnlessComparison(
   }
   const comparison = COMPARISON_PROSE_RE.exec(tag);
   return comparison &&
+    !HTML_ELEMENT_NAME_RE.test(comparison[1]) &&
     COMPARISON_CLAUSE_RE.test(tag) &&
     !closingTagNames.has(comparison[1].toLowerCase())
     ? tag
