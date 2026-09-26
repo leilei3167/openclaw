@@ -56,11 +56,11 @@ function stripHtmlTagUnlessComparison(
   ) {
     return "";
   }
-  const comparison = COMPARISON_PROSE_RE.exec(tag);
-  return comparison &&
-    !HTML_ELEMENT_NAME_RE.test(comparison[1]) &&
+  const comparisonName = COMPARISON_PROSE_RE.exec(tag)?.[1];
+  return comparisonName !== undefined &&
+    !HTML_ELEMENT_NAME_RE.test(comparisonName) &&
     COMPARISON_CLAUSE_RE.test(tag) &&
-    !closingTagNames.has(comparison[1].toLowerCase())
+    !closingTagNames.has(comparisonName.toLowerCase())
     ? tag
     : "";
 }
@@ -91,8 +91,8 @@ function convertHtmlOutsideCode(text: string, options: { style?: "markdown" }): 
 
   // A matching closer is positive markup evidence, even when its content is numeric.
   const closingTagNames = new Set<string>();
-  for (const tag of converted.matchAll(/<\/([a-z][a-z0-9_.:-]*)\s*>/gi)) {
-    closingTagNames.add(tag[1].toLowerCase());
+  for (const tag of converted.matchAll(/<\/[a-z][a-z0-9_.:-]*\s*>/gi)) {
+    closingTagNames.add(tag[0].slice(2, -1).trim().toLowerCase());
   }
   return removeMatchesUntilStable(converted, HTML_TAG_RE, (tag, offset, source) =>
     stripHtmlTagUnlessComparison(tag, offset, source, closingTagNames),
