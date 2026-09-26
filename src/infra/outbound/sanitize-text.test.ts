@@ -327,6 +327,16 @@ describe("sanitizeForPlainText", () => {
     expect(sanitizeForPlainText(input)).toBe(input);
   });
 
+  it.each([10_000, 40_000])("bounds malformed comparison scanning with %i spaces", (size) => {
+    const input = `x<max${" ".repeat(size)}= and wait>5`;
+    const started = process.hrtime.bigint();
+    const sanitized = sanitizeForPlainText(input);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(sanitized).toBe("x5");
+    expect(elapsedMs).toBeLessThan(500);
+  });
+
   it.each([
     ["checkbox-after-value", 'x^2 • <input type="checkbox" checked/>done', "x^2 • done"],
     ["boolean-after-value", '<input type="checkbox" disabled/>todo', "todo"],
