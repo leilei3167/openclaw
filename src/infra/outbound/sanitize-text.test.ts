@@ -353,6 +353,7 @@ describe("sanitizeForPlainText", () => {
     ["custom-element-bare", "<custom-element data-x>text</custom-element>", "text"],
     ["custom-element-empty", "<my-widget hidden>", ""],
     ["qualified-bare", "<vendor:note data-x>text</vendor:note>", "text"],
+    ["unpaired-dot-qualified-clause", "foo<vendor.note and wait>5", "foo5"],
     ["adjacent-numeric", "foo<span data-x>5</span>", "foo5"],
     ["paired-clause", "foo<span and wait>5</span>", "foo5"],
     ["void-numeric", "foo<img hidden>5", "foo5"],

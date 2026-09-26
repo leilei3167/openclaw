@@ -10,7 +10,7 @@ export { stripInternalRuntimeScaffolding };
 // Preserve the existing tag grammar; only exclude unspaced comparison prose.
 const HTML_TAG_RE = /<\/?[a-z][a-z0-9_.:-]*(?=[\s/>])[^>]*>/gi;
 // Disjoint whitespace/prose branches avoid quadratic backtracking on malformed tags.
-const COMPARISON_PROSE_RE = /^<([a-z][a-z0-9_.]*)\s+[^<>=/"'\s][^<>=/"']*>$/i;
+const COMPARISON_PROSE_RE = /^<([a-z][a-z0-9_]*\.?)\s+[^<>=/"'\s][^<>=/"']*>$/i;
 const COMPARISON_LEFT_OPERAND_RE = /[\p{L}\p{N}_\p{S}]$/u;
 const COMPARISON_CLAUSE_RE = /\b(?:and|or)\s|[.!?;:]\s|且/iu;
 // Standard HTML element names are never comparison operands: retain main's
