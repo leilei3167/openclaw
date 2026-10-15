@@ -4,11 +4,12 @@ export async function advanceAuthProfileCandidate<Candidate>(params: {
   isAvailable(profileId: Candidate, index: number): boolean;
   tryPrepare(profileId: Candidate, index: number): Promise<boolean>;
 }): Promise<boolean> {
-  while (params.state.profileIndex + 1 < params.candidates.length) {
-    const index = params.state.profileIndex + 1;
+  for (const [index, candidate] of params.candidates.entries()) {
+    if (index <= params.state.profileIndex) {
+      continue;
+    }
     // Exhaustion must not depend on credential-health bookkeeping succeeding.
     params.state.profileIndex = index;
-    const candidate = params.candidates[index];
     if (params.isAvailable(candidate, index) && (await params.tryPrepare(candidate, index))) {
       return true;
     }
