@@ -77,6 +77,7 @@ vi.mock("./auth-profiles/store-runtime.js", () => ({
   ensureAuthProfileStoreAsync: hoisted.ensureAuthProfileStoreMock,
 }));
 
+// mock-isolation: Keep quota probes and credential-health writes out of the model-preparation fixture.
 vi.mock("./auth-profiles/usage.js", () => ({
   reconcileAuthProfileQuotaBlocks: vi.fn(async () => {}),
   markAuthProfileFailure: hoisted.markAuthProfileFailureMock,
