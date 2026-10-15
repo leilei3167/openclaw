@@ -24,7 +24,7 @@ export async function completeWithAuthProfileFailover(params: {
   cfg: OpenClawConfig;
   agentDir: string;
   signal?: AbortSignal;
-  assertCurrent(): void;
+  assertCurrent: () => void;
   complete(prepared: PreparedModel): Promise<AssistantMessage>;
   warn(message: string): void;
 }): Promise<AssistantMessage> {
