@@ -13,6 +13,7 @@ const owner = {
   id: "profile-alex",
   identity: { type: "profile" as const, id: "profile-alex" },
   label: "Alex Rivera",
+  avatarUrl: "/api/users/profile-alex/avatar?v=1",
 };
 const rows = [
   {
@@ -49,6 +50,15 @@ suite.define(() => {
       await suite.withPage({ viewport: { width, height }, colorScheme: mode }, async ({ page }) => {
         const gateway = await installMockGateway(page, {
           methodResponses: {
+            "agent.identity.get": {
+              cases: [
+                {
+                  match: { agentId: "main" },
+                  response: { agentId: "main", name: "Lobster", avatar: "/avatar/main" },
+                },
+                { response: { agentId: "reviewer", name: "Review bot", avatar: "" } },
+              ],
+            },
             "sessions.list": {
               cases: [
                 {
@@ -59,6 +69,7 @@ suite.define(() => {
               ],
             },
             "sessions.search": {
+              sessions: rows.slice(1),
               results: rows.slice(1).map((row, index) => ({
                 sessionKey: row.key,
                 sessionId: "fixture-" + index,
@@ -99,7 +110,7 @@ suite.define(() => {
         await page.route("**/avatar/main", (route) =>
           route.fulfill({ contentType: "image/svg+xml", body: agentAvatar }),
         );
-        await page.route("**/api/users/profile-alex/avatar", (route) =>
+        await page.route("**/api/users/profile-alex/avatar*", (route) =>
           route.fulfill({ contentType: "image/svg+xml", body: ownerAvatar }),
         );
         await page.goto(suite.server.baseUrl + "chat");
@@ -127,6 +138,21 @@ suite.define(() => {
           animations: "disabled",
           path: path.join(suite.artifactDir, "palette-" + width + "-" + mode + ".png"),
         });
+        const transcriptRequests = await gateway.getRequests("sessions.search");
+        expect(transcriptRequests).toHaveLength(1);
+        expect(transcriptRequests[0]?.params).toEqual({
+          query: "missing errors",
+          limit: 25,
+          scope: {
+            includeGlobal: false,
+            includeUnknown: false,
+            configuredAgentsOnly: true,
+            excludeSubagents: true,
+            excludeCron: true,
+            excludeSystem: true,
+            excludeDock: true,
+          },
+        });
         expect(await results.locator(".cmd-palette__avatar").count()).toBe(3);
         expect(await results.locator(".cmd-palette__owner").count()).toBe(2);
         expect(await results.locator("mark").count()).toBeGreaterThan(0);
@@ -143,11 +169,40 @@ suite.define(() => {
         await expect.poll(() => results.getByRole("option").count()).toBe(1);
         await filters.getByRole("button", { name: /^All/ }).click();
         await expect.poll(() => results.getByRole("option").count()).toBe(3);
-        const notices = page.locator(".cmd-palette__notices");
-        await notices.locator("summary").focus();
-        await page.keyboard.press("Enter");
-        expect(await notices.evaluate((el) => el.hasAttribute("open"))).toBe(true);
+        expect(await page.getByText("Search notices", { exact: false }).count()).toBe(0);
+        expect(
+          await page.getByRole("status").filter({ hasText: "Indexing older messages" }).isVisible(),
+        ).toBe(true);
         expect(await input.isVisible()).toBe(true);
+        await gateway.setMethodResponse("sessions.search", {
+          sessions: rows.slice(1),
+          results: rows.slice(1).map((row, index) => ({
+            sessionKey: row.key,
+            sessionId: "fixture-" + index,
+            messageId: "message-" + index,
+            role: "assistant",
+            timestamp: row.updatedAt,
+            snippet: "The missing errors appear in this conversation.",
+            score: 10 - index,
+          })),
+          truncated: true,
+        });
+        await input.fill("missing errors ");
+        await expect
+          .poll(async () => (await gateway.getRequests("sessions.search")).length)
+          .toBe(2);
+        await expect.poll(() => results.getAttribute("aria-busy")).toBe("false");
+        await expect.poll(() => results.getByRole("option").count()).toBe(3);
+        expect(
+          await page.locator(".cmd-palette__search").getByRole("status").allTextContents(),
+        ).toEqual([]);
+        expect(
+          await page.getByText(/Search notices|Indexing older messages|may be incomplete/).count(),
+        ).toBe(0);
+        await page.locator(".cmd-palette").screenshot({
+          animations: "disabled",
+          path: path.join(suite.artifactDir, "palette-limited-" + width + "-" + mode + ".png"),
+        });
         await input.focus();
         await input.press("ArrowDown");
         await input.press("Enter");

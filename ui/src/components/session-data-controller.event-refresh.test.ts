@@ -15,6 +15,7 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0)) {
     cleanup();
   }
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -158,11 +159,17 @@ function createFilteredSessionController(
     },
     connected: true,
     activeRouteId: "sessions",
+    sessionCatalogRowsVisible: true,
+    navigationVisible: true,
+    navigationView: "sessions" as const,
+    sidebarAgentsMode: "chip" as const,
+    shouldPublishSessionData: () => true,
     getRouteSessionKey: () => context.gateway.snapshot.sessionKey.trim(),
+    childSessionParents: () => new Set(),
     sessionDataContext: context,
     addController: () => undefined,
     removeController: () => undefined,
-    requestUpdate: () => undefined,
+    requestUpdate: vi.fn(),
     updateComplete: Promise.resolve(true),
     dismissTransientMenus: () => false,
     expandedAgentId: () => selectedAgentId,
@@ -172,6 +179,7 @@ function createFilteredSessionController(
     sidebarSessionOwnerFilter: () => membership,
     sessionCatalogIdsWithoutVisibleRows: () => [],
     querySelector: () => null,
+    samePresence: () => false,
   } satisfies SessionDataControllerHost;
   const controller = new SessionDataController(host);
 
@@ -184,6 +192,15 @@ function createFilteredSessionController(
     },
     controller,
     list,
+    publishPresence: (instanceId: string) => {
+      for (const listener of eventListeners) {
+        listener({
+          type: "event",
+          event: "presence",
+          payload: { presence: [{ instanceId, ts: 1 }] },
+        });
+      }
+    },
     resultForKeys,
     reconnect: () => {
       for (const phase of ["reconnecting", "connected"] as const) {
@@ -235,6 +252,67 @@ function createFilteredSessionController(
 }
 
 describe("filtered sidebar session event refresh", () => {
+  it.each(["active", "all"] as const)(
+    "coalesces %s session and presence publications while preserving immediate state",
+    async (statusFilter) => {
+      const { controller, host, publishPresence, disconnectHost } = createFilteredSessionController(
+        statusFilter,
+        300,
+        true,
+      );
+      const frames = new Map<number, FrameRequestCallback>();
+      let frameId = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++frameId, callback);
+        return frameId;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+      const flushFrame = () => {
+        const pending = [...frames.values()];
+        frames.clear();
+        for (const callback of pending) {
+          callback(0);
+        }
+      };
+      try {
+        controller.hostConnected();
+        await controller.refreshSidebarSessions();
+        flushFrame();
+        host.requestUpdate.mockClear();
+
+        for (let index = 0; index < 30; index += 1) {
+          publishPresence(`profile-${index}`);
+          await Promise.resolve();
+        }
+        await controller.refreshSidebarSessions();
+
+        expect(controller.presencePayload?.presence?.[0]?.instanceId).toBe("profile-29");
+        expect(controller.sessionsResult?.sessions).toHaveLength(SIDEBAR_SESSION_ROSTER_LIMIT);
+        expect(host.requestUpdate).not.toHaveBeenCalled();
+        flushFrame();
+        expect(host.requestUpdate).toHaveBeenCalledOnce();
+
+        host.requestUpdate.mockClear();
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        publishPresence("hidden-profile");
+        expect(controller.presencePayload?.presence?.[0]?.instanceId).toBe("hidden-profile");
+        expect(host.requestUpdate).toHaveBeenCalledOnce();
+
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "visible",
+        });
+        host.requestUpdate.mockClear();
+        publishPresence("retired-profile");
+        disconnectHost();
+        flushFrame();
+        expect(host.requestUpdate).not.toHaveBeenCalled();
+      } finally {
+        controller.hostDisconnected();
+      }
+    },
+  );
+
   it("keeps shared group hydration when its first sidebar presenter disconnects", async () => {
     const { controller, context, host, disconnectHost } = createFilteredSessionController("active");
     const bootstrap = context.connectionBootstrap;
@@ -266,7 +344,11 @@ describe("filtered sidebar session event refresh", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(list).toHaveBeenCalledOnce();
         expect(list).toHaveBeenLastCalledWith(
-          expect.objectContaining({ agentId: "main", archivedFilter: statusFilter }),
+          expect.objectContaining({
+            agentId: "main",
+            archivedFilter: statusFilter,
+            excludeDock: true,
+          }),
         );
         expect(controller.sessionsResult?.sessions).toHaveLength(1);
         controller.hostDisconnected();
@@ -301,7 +383,9 @@ describe("filtered sidebar session event refresh", () => {
       try {
         await selectMembership({ ownerId: null, involvingMe: true });
         expect(controller.sessionsResult?.sessions).toHaveLength(pageSize);
-        expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ involvingMe: true }));
+        expect(list).toHaveBeenLastCalledWith(
+          expect.objectContaining({ involvingMe: true, excludeDock: true }),
+        );
         expect(controller.sessionsResult?.sessions.every((row) => row.updatedAt! % 2 === 1)).toBe(
           true,
         );
@@ -316,7 +400,7 @@ describe("filtered sidebar session event refresh", () => {
 
         list.mockClear();
         publishSessionChanged();
-        await vi.advanceTimersByTimeAsync(200);
+        await vi.advanceTimersByTimeAsync(5_000);
         expect(list.mock.calls.some(([query]) => query?.involvingMe === true)).toBe(true);
         expect(controller.sessionsResult?.sessions).toHaveLength(pageSize * 2);
 
@@ -502,6 +586,7 @@ describe("filtered sidebar session event refresh", () => {
     "refreshes the %s list once for duplicate remote session events",
     async (statusFilter) => {
       vi.useFakeTimers();
+      vi.spyOn(Math, "random").mockReturnValue(0);
       const { controller, list, publishSessionChanged } =
         createFilteredSessionController(statusFilter);
       controller.hostConnected();
@@ -510,7 +595,7 @@ describe("filtered sidebar session event refresh", () => {
 
       publishSessionChanged();
       publishSessionChanged();
-      await vi.advanceTimersByTimeAsync(199);
+      await vi.advanceTimersByTimeAsync(4_999);
       expect(list).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
 
@@ -542,7 +627,7 @@ describe("filtered sidebar session event refresh", () => {
       list.mockClear();
 
       publishSessionChanged();
-      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(5_000);
 
       expect(list).toHaveBeenCalledOnce();
       expect(list).toHaveBeenCalledWith(
@@ -566,7 +651,7 @@ describe("filtered sidebar session event refresh", () => {
     list.mockClear();
 
     publishSessionChanged({ sessionKey: "agent:research:remote-change", agentId: "research" });
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(5_000);
 
     expect(list).not.toHaveBeenCalled();
     controller.hostDisconnected();
@@ -583,7 +668,7 @@ describe("filtered sidebar session event refresh", () => {
     publishSessionChanged();
     selectAgent("research");
     list.mockClear();
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(5_000);
 
     expect(list).not.toHaveBeenCalled();
     controller.hostDisconnected();
@@ -614,9 +699,13 @@ describe("filtered sidebar session event refresh", () => {
   });
 
   it("retires an in-flight child snapshot when the status filter changes", async () => {
-    const { controller, list, selectStatusFilter } = createFilteredSessionController("archived");
+    const { controller, host, list, selectStatusFilter } =
+      createFilteredSessionController("archived");
     controller.hostConnected();
     await controller.refreshSidebarSessions();
+    const parents = vi
+      .spyOn(host, "childSessionParents")
+      .mockReturnValue(new Set(["agent:main:parent"]));
     let resolveChildPage!: (value: Awaited<ReturnType<typeof list>>) => void;
     const childPage = new Promise<Awaited<ReturnType<typeof list>>>((resolve) => {
       resolveChildPage = resolve;
@@ -626,6 +715,7 @@ describe("filtered sidebar session event refresh", () => {
     const pendingChildren = controller.loadChildSessions("agent:main:parent");
     expect(controller.loadingChildSessionKeys.has("agent:main:parent")).toBe(true);
 
+    parents.mockReturnValue(new Set());
     selectStatusFilter("all");
     resolveChildPage({
       ts: 2,
@@ -647,6 +737,7 @@ describe("filtered sidebar session event refresh", () => {
 
   it("bounds refresh latency while same-agent events continue arriving", async () => {
     vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
     const { controller, list, publishSessionChanged } = createFilteredSessionController("all");
     controller.hostConnected();
     await controller.refreshSidebarSessions();
@@ -654,7 +745,7 @@ describe("filtered sidebar session event refresh", () => {
 
     publishSessionChanged();
     for (let index = 0; index < 5; index += 1) {
-      await vi.advanceTimersByTimeAsync(199);
+      await vi.advanceTimersByTimeAsync(999);
       publishSessionChanged();
     }
     expect(list).not.toHaveBeenCalled();
@@ -673,7 +764,7 @@ describe("filtered sidebar session event refresh", () => {
 
     publishSessionChanged();
     controller.hostDisconnected();
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(5_000);
 
     expect(list).not.toHaveBeenCalled();
   });
@@ -701,7 +792,7 @@ describe("filtered sidebar session event refresh", () => {
     list.mockImplementationOnce(async () => await firstRefresh).mockResolvedValue(refreshedPage);
 
     publishSessionChanged();
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(list).toHaveBeenCalledOnce();
 
     publishSessionChanged();
@@ -711,7 +802,7 @@ describe("filtered sidebar session event refresh", () => {
     expect(list).toHaveBeenCalledOnce();
 
     resolveFirstRefresh(refreshedPage);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(4_999);
     expect(list).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
 

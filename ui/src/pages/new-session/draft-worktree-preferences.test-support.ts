@@ -3,12 +3,13 @@ import { expect, vi } from "vitest";
 import type { UsersPrefsSetParams } from "../../../../packages/gateway-protocol/src/schema/users.ts";
 import { saveUserPreferences } from "../../app/user-prefs-cache.ts";
 import { createDraftFixture } from "./draft-submission-flow.test-support.ts";
-import { loadNewSessionPreference, patchNewSessionPreference } from "./preferences.ts";
+import { loadNewSessionPreference, replaceBrowserPreference } from "./preferences.ts";
 
 export function identityPreferences(
   identified = true,
   modelCatalog?: NonNullable<Parameters<typeof createDraftFixture>[0]>["modelCatalog"],
   initialEntries?: Record<string, unknown>,
+  profileId = "person-a",
 ) {
   let entries: Record<string, unknown> = initialEntries ?? {
     "new-session.migration.v1": true,
@@ -28,7 +29,7 @@ export function identityPreferences(
     },
   };
   if (!identified) {
-    patchNewSessionPreference("ws://gateway.example", "main", {
+    replaceBrowserPreference("ws://gateway.example", "main", {
       workspace: "/repo",
       folder: "/repo",
       worktree: true,
@@ -40,7 +41,7 @@ export function identityPreferences(
   const beforeRead = vi.fn(async () => {});
   const options = {
     modelCatalog,
-    ...(identified ? { selfUser: { id: "person-a" } } : {}),
+    ...(identified ? { selfUser: { id: profileId } } : {}),
     scopes: ["operator.admin", "operator.read", "operator.write"],
     methods: ["sessions.create", "sessions.dispatch", "users.prefs.get", "users.prefs.set"],
     agents: [

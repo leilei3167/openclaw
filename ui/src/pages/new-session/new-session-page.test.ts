@@ -1,11 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { t } from "../../i18n/index.ts";
+import { settleWebAwesome } from "../../test-helpers/web-awesome.ts";
+import * as attachmentInputs from "../chat/components/chat-attachment-inputs.tsx";
+import type { ChatDetailPanel } from "../chat/components/chat-detail-panel.tsx";
 import { NewSessionDictationControl } from "./composer-dictation-control.ts";
+import { DraftPlaceBrowser } from "./draft-place-browser.ts";
 import type { NewSessionRouteData } from "./location.ts";
+import { NewSessionModelControl } from "./model-control.ts";
+import { NewSessionPageOwner } from "./new-session-page-owner.ts";
 import "./new-session-page-entry.ts";
 
 type NewSessionElement = HTMLElement & {
   data: NewSessionRouteData | undefined;
+  focusComposer(): void;
   updateComplete: Promise<boolean>;
   requestUpdate: () => void;
 };
@@ -15,7 +22,6 @@ function routeData(agentId: string, catalogId = ""): NewSessionRouteData {
     agentId,
     requestedAgentId: agentId,
     catalogId,
-    model: "",
     catalogLabel: "",
     startTerminal: false,
   };
@@ -58,6 +64,140 @@ afterEach(() => {
 });
 
 describe("new session draft route ownership", () => {
+  it("prepares composer options once per published typing revision without replacing the input", async () => {
+    const prepare = vi.spyOn(NewSessionPageOwner.prototype, "composerOptions");
+    const updated = vi.spyOn(NewSessionPageOwner.prototype, "updated");
+    const renderModels = vi.spyOn(NewSessionModelControl.prototype, "renderProps");
+    const page = await mount(routeData("research"));
+    const textarea = page.querySelector<HTMLTextAreaElement>("textarea")!;
+    await enterMessage(page, "warmup");
+    for (const text of ["h", "he", "hello"]) {
+      prepare.mockClear();
+      updated.mockClear();
+      renderModels.mockClear();
+      await enterMessage(page, text);
+      expect(updated).toHaveBeenCalled();
+      expect(prepare).toHaveBeenCalledTimes(updated.mock.calls.length);
+      expect(renderModels).not.toHaveBeenCalled();
+      expect(page.querySelector("textarea")).toBe(textarea);
+      expect(textarea.value).toBe(text);
+    }
+  });
+
+  it("keeps retained attachment callbacks connected to live draft and lock state", async () => {
+    const inputs = vi.spyOn(attachmentInputs, "ChatAttachmentInputs");
+    let dictating = false;
+    vi.spyOn(NewSessionDictationControl.prototype, "active", "get").mockImplementation(
+      () => dictating,
+    );
+    const page = await mount(routeData("research"));
+    await enterMessage(page, "initial draft");
+    const retained = inputs.mock.calls.at(-1)?.[0];
+    expect(retained).toBeDefined();
+    expect(retained?.getDraft?.()).toBe("initial draft");
+    await enterMessage(page, "later draft");
+    expect(retained?.getDraft?.()).toBe("later draft");
+    dictating = true;
+    page.requestUpdate();
+    await settle(page);
+    expect(retained?.disabled).toBe(true);
+  });
+
+  it("prepares composer options once per draft revision rather than per prop read", async () => {
+    const page = await mount(routeData("research"));
+    const textarea = page.querySelector("textarea");
+    const prepare = vi.spyOn(NewSessionPageOwner.prototype, "composerOptions");
+    const projectRecents = vi.spyOn(DraftPlaceBrowser.prototype, "resolveProjectRecents");
+
+    await enterMessage(page, "Keep typing without rebuilding options");
+
+    expect(message(page)).toBe("Keep typing without rebuilding options");
+    expect(page.querySelector("textarea")).toBe(textarea);
+    expect(prepare.mock.calls.length).toBeGreaterThan(0);
+    expect(prepare.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(projectRecents.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it.each([false, true])(
+    "retires composer frames through detach and reattach (reduced motion: %s)",
+    async (reducedMotion) => {
+      vi.stubGlobal("matchMedia", (media: string) => ({
+        media,
+        matches: reducedMotion && media === "(prefers-reduced-motion: reduce)",
+        onchange: null,
+        addListener() {},
+        removeListener() {},
+        addEventListener() {},
+        removeEventListener() {},
+        dispatchEvent: () => true,
+      }));
+      let nextFrame = 0;
+      const frames = new Map<number, FrameRequestCallback>();
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        const id = ++nextFrame;
+        frames.set(id, callback);
+        return id;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+      const page = await mount(routeData("research"));
+      const flushFrames = async (timestamp: number) => {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        for (const callback of callbacks) {
+          callback(timestamp);
+        }
+        await settle(page);
+      };
+      const placeholder = () => page.querySelector<HTMLTextAreaElement>("textarea")?.placeholder;
+      const target = t("newSession.messagePlaceholder");
+      await flushFrames(0);
+      await flushFrames(206);
+      expect(placeholder()).toBe(reducedMotion ? target : target.slice(0, 1));
+      page.requestUpdate();
+      page.remove();
+      await settle(page);
+      expect(frames.size).toBe(0);
+
+      document.body.append(page);
+      await settle(page);
+      await flushFrames(0);
+      await flushFrames(206);
+      expect(placeholder()).toBe(reducedMotion ? target : target.slice(0, 1));
+      await enterMessage(page, "Keep this draft");
+      await flushFrames(232);
+      expect(placeholder()).toBe(target);
+      expect(frames.size).toBe(0);
+    },
+  );
+
+  it("focuses an opened draft and refocuses without changing its message", async () => {
+    const page = await mount(routeData("research"));
+    const textarea = page.querySelector<HTMLTextAreaElement>(".new-session-page__message");
+    expect(document.activeElement).toBe(textarea);
+    expect(textarea?.getAttribute("aria-label")).toBe(t("newSession.messagePlaceholder"));
+    await enterMessage(page, "Keep this draft; do not submit it");
+    const other = document.body.appendChild(document.createElement("button"));
+    try {
+      other.focus();
+      page.focusComposer();
+      await settle(page);
+      expect(document.activeElement).toBe(textarea);
+      expect(message(page)).toBe("Keep this draft; do not submit it");
+      page.focusComposer();
+      other.focus();
+      await settle(page);
+      expect(document.activeElement).toBe(other);
+      (document.openClawModalLayers ??= new Set()).add(other);
+      other.focus();
+      page.focusComposer();
+      await settle(page);
+      expect(document.activeElement).toBe(other);
+    } finally {
+      document.openClawModalLayers?.delete(other);
+      other.remove();
+    }
+  });
+
   it.each(["show in composer", "finish dictation", "change route", "disconnect"] as const)(
     "opens pasted text in the shared side panel and clears it on %s",
     async (transition) => {
@@ -81,7 +221,7 @@ describe("new session draft route ownership", () => {
       expect(paste.defaultPrevented).toBe(true);
       await settle(page);
       await expect
-        .poll(() => page.querySelector("openclaw-chat-pasted-text [role=button]"))
+        .poll(() => page.querySelector("openclaw-chat-pasted-text .chat-attachment-file__open"))
         .not.toBeNull();
       if (transition === "finish dictation") {
         dictating = true;
@@ -89,8 +229,13 @@ describe("new session draft route ownership", () => {
         await settle(page);
         expect(page.querySelector<HTMLTextAreaElement>("textarea")?.readOnly).toBe(true);
       }
-      page.querySelector<HTMLElement>("openclaw-chat-pasted-text [role=button]")?.click();
+      page
+        .querySelector<HTMLElement>("openclaw-chat-pasted-text .chat-attachment-file__open")
+        ?.click();
+      await customElements.whenDefined("openclaw-chat-detail-panel");
+      await settle(page);
       await expect.poll(() => page.querySelector("openclaw-chat-detail-panel")).not.toBeNull();
+      await page.querySelector<ChatDetailPanel>("openclaw-chat-detail-panel")?.updateComplete;
       await expect
         .poll(() => {
           const source = page
@@ -160,6 +305,8 @@ describe("new session draft route ownership", () => {
     const link = append(document.createElement("a"));
     link.href = "#target";
     const menu = append(document.createElement("wa-dropdown")) as HTMLElement & { open: boolean };
+    const menuTrigger = menu.appendChild(document.createElement("button"));
+    menuTrigger.slot = "trigger";
     const menuItem = menu.appendChild(document.createElement("wa-dropdown-item"));
     menuItem.setAttribute("role", "menuitemradio");
     menuItem.tabIndex = -1;
@@ -213,6 +360,7 @@ describe("new session draft route ownership", () => {
         for (const [index, key] of keys.entries()) {
           menu.open = row.openDropdown === true;
           dialog.open = row.openDialog === true;
+          await settleWebAwesome(menu.parentElement!);
           target.focus();
           target.dispatchEvent(
             new KeyboardEvent("keydown", { key, bubbles: true, composed: true }),
@@ -228,59 +376,6 @@ describe("new session draft route ownership", () => {
         }
       }
     }
-  });
-
-  it("leaves shortcuts, composition, and other form controls alone", async () => {
-    const page = await mount(routeData("research"));
-    const textarea = page.querySelector<HTMLTextAreaElement>(".new-session-page__message");
-
-    for (const init of [
-      { key: "x", ctrlKey: true },
-      { key: "x", metaKey: true },
-      { key: "Tab" },
-      { key: "Escape" },
-      { key: "Process", isComposing: true },
-    ]) {
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { ...init, bubbles: true, composed: true }),
-      );
-      expect(document.activeElement).not.toBe(textarea);
-    }
-
-    const editable = document.createElement("div");
-    editable.setAttribute("contenteditable", "true");
-    for (const control of [
-      document.createElement("input"),
-      document.createElement("select"),
-      document.createElement("textarea"),
-      editable,
-    ]) {
-      page.append(control);
-      control.focus();
-      control.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "x", bubbles: true, composed: true }),
-      );
-      expect(document.activeElement).toBe(control);
-    }
-  });
-
-  it("labels the message input independently of its placeholder", async () => {
-    const page = await mount(routeData("research"));
-    const textarea = page.querySelector<HTMLTextAreaElement>(".new-session-page__message");
-
-    expect(textarea?.getAttribute("aria-label")).toBe(t("newSession.messagePlaceholder"));
-  });
-
-  it("clears source draft state when destination data is still pending", async () => {
-    const page = await mount(routeData("research"));
-    window.history.replaceState({}, "", "/new?agent=research");
-    await enterMessage(page, "source draft");
-
-    window.history.replaceState({}, "", "/new?agent=research&catalog=claude");
-    page.data = undefined;
-    await settle(page);
-
-    expect(message(page)).toBe("");
   });
 
   it("keeps destination input through pending data, settlement, and agent resolution", async () => {

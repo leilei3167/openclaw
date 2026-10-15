@@ -14,6 +14,26 @@ export const HOME_PANEL_TOGGLE_EVENT = "openclaw:home-toggle";
 export const CUSTODIAN_PANEL_TOGGLE_EVENT = "openclaw:custodian-toggle";
 export const DEBUG_OVERLAY_REQUEST_EVENT = "openclaw:debug-overlay-request";
 export const KEYBOARD_SHORTCUTS_REQUEST_EVENT = "openclaw:keyboard-shortcuts-request";
+export const LINK_READER_PANEL_TOGGLE_EVENT = "openclaw:link-reader-panel-toggle";
+export type LinkReaderPanelToggleDetail = {
+  url?: string;
+  newTab?: boolean;
+  open?: boolean;
+  trigger?: HTMLElement;
+  agentId?: string;
+};
+
+export const PLUGIN_PANEL_TOGGLE_EVENT = "openclaw:plugin-panel-toggle";
+
+export type PluginPanelToggleDetail = {
+  pluginId: string;
+  panelId: string;
+  sessionKey: string;
+  agentId?: string;
+  open: boolean;
+  dock?: "bottom" | "right";
+};
+
 export const UI_COMMAND_EVENT = "openclaw:ui-command";
 
 export type UiCommandDetail = UiCommandParams;
@@ -45,14 +65,11 @@ export type DesktopPanelToggleDetail = {
 };
 
 export type PortalPanelToggleDetail = {
+  requestId?: string;
   dock?: "bottom" | "right";
   open?: boolean;
   portalId?: string;
   environmentId?: string;
-};
-
-export type PanelToggleElement = HTMLElement & {
-  handleToggleRequest: (event: Event) => void;
 };
 
 export function isTerminalPanelShortcut(event: KeyboardEvent): boolean {

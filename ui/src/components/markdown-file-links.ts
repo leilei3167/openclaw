@@ -12,7 +12,11 @@ const FILE_LINE_SUFFIX_SOURCE = ":\\d{1,6}(?:[-:]\\d{1,6})?";
 function fileGrammar(extension: string, segment = FILE_SEGMENT_SOURCE) {
   const name = `${segment}\\.${extension}`;
   const prefixed = `(?:~\\/|\\.\\.\\/|\\.\\/|\\/)(?:${segment}\\/)*${name}`;
-  const unprefixed = `${segment}(?:\\/${segment})*\\/${name}`;
+  // A domain-shaped root is ambiguous, not evidence of a workspace file.
+  // Local directories with that spelling remain addressable with ./ (or an absolute path).
+  const domain =
+    "[\\p{L}\\p{M}\\p{N}-]+(?:\\.[\\p{L}\\p{M}\\p{N}-]+)*\\.(?:[\\p{L}\\p{M}]{2,}|[xX][nN]--[A-Za-z0-9-]+)";
+  const unprefixed = `(?!${domain}\\/)${segment}(?:\\/${segment})*\\/${name}`;
   const windowsAbsolute = `[A-Za-z]:[\\\\/](?:${segment}[\\\\/])*${name}`;
   // A reference may not stop early inside a longer token ("logs/app.log.1" must not link "logs/app.log").
   const end = "(?!\\.?[\\p{L}\\p{M}\\p{N}_])";
@@ -39,6 +43,7 @@ const BARE_FILE_EXTENSIONS = new Set([
   "cpp",
   "cs",
   "css",
+  "csv",
   "diff",
   "fish",
   "go",
@@ -84,9 +89,13 @@ const BARE_FILE_EXTENSIONS = new Set([
   "zsh",
 ]);
 
-export function markdownFileLinkFromEvent(
-  event: Event,
-): { path: string; line: number | null } | null {
+export type MarkdownFileLinkTarget = {
+  path: string;
+  line?: number | null;
+  sessionKey?: string;
+};
+
+export function markdownFileLinkFromEvent(event: Event): MarkdownFileLinkTarget | null {
   const target = event.target;
   if (!(target instanceof Element)) {
     return null;
@@ -97,12 +106,17 @@ export function markdownFileLinkFromEvent(
     return null;
   }
   const line = link.dataset.fileLine;
-  return { path, line: line ? Number.parseInt(line, 10) : null };
+  const sessionKey = link.closest<HTMLElement>("[data-file-session-key]")?.dataset.fileSessionKey;
+  return {
+    path,
+    line: line ? Number.parseInt(line, 10) : null,
+    ...(sessionKey ? { sessionKey } : {}),
+  };
 }
 
 export function markdownFileLinkFromKeyboardEvent(
   event: KeyboardEvent,
-): { path: string; line: number | null } | null {
+): MarkdownFileLinkTarget | null {
   if (event.key !== "Enter" && event.key !== " ") {
     return null;
   }

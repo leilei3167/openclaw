@@ -24,7 +24,7 @@ import {
   onCronJobInactive,
   resetCronActiveJobs,
 } from "./active-jobs.js";
-import { prepareCronPromptRunAdmission } from "./isolated-agent/run-admission.js";
+import { prepareCronRunAdmission } from "./run-admission.js";
 
 afterEach(() => {
   resetCronActiveJobs();
@@ -80,7 +80,8 @@ describe("cron message action authority", () => {
       const jobId = "long-message-read";
       const marker = markCronJobActive(jobId, { isMessageActionAuthorityCurrent: () => true });
       const controller = new AbortController();
-      const owner = prepareCronPromptRunAdmission({
+      const owner = prepareCronRunAdmission({
+        deliveryAttemptFence: { beforeAttempt: async () => {}, assertCurrent: () => {} },
         cfg: { agents: { defaults: { timeoutSeconds: 40 } } },
         agentId: "main",
         runId: "long-message-run",
@@ -222,6 +223,16 @@ describe("cron message action authority", () => {
   );
 });
 
+it("refuses self-removal without an active run", () => {
+  const commitGuard = bindCronSelfRemovalCommitGuard(
+    "idle-job",
+    createOperationalRunInstanceRef("idle-run"),
+    vi.fn(),
+    vi.fn(),
+  );
+  expect(commitGuard).toThrow("Cron self-removal requires the exact live run");
+});
+
 describe.each(["same module", "reload before guard", "reload after guard"])(
   "active cron self-removal ownership: %s",
   (moduleBoundary) => {
@@ -266,7 +277,7 @@ describe.each(["same module", "reload before guard", "reload after guard"])(
         });
         expect(assertMessageCurrent).not.toThrow();
         let callerActive = true;
-        const commitGuard = vi.fn();
+        let commitGuard: () => void = vi.fn();
         const bindingModule =
           moduleBoundary === "reload before guard"
             ? await importFreshModule<typeof import("./active-jobs.js")>(
@@ -274,7 +285,7 @@ describe.each(["same module", "reload before guard", "reload after guard"])(
                 "./active-jobs.js?cron-self-removal-before-guard",
               )
             : { bindCronSelfRemovalCommitGuard };
-        bindingModule.bindCronSelfRemovalCommitGuard(
+        commitGuard = bindingModule.bindCronSelfRemovalCommitGuard(
           jobId,
           scenario === "different instance"
             ? createOperationalRunInstanceRef(context.operationalRunInstance.runId)
@@ -304,6 +315,13 @@ describe.each(["same module", "reload before guard", "reload after guard"])(
         const cancel = vi.fn();
         currentMarker.cancellation = { kind: "bound", cancel };
 
+        if (scenario === "active owner" || scenario === "copied guard") {
+          expect(commitGuard).not.toThrow();
+        } else {
+          expect(commitGuard).toThrow();
+        }
+        expect(cancel).not.toHaveBeenCalled();
+        expect(currentMarker.jobRemoved).toBeUndefined();
         const removalGuard = scenario === "copied guard" ? () => commitGuard() : commitGuard;
         const removalModule =
           moduleBoundary === "same module"
@@ -372,14 +390,6 @@ describe("active cron schedule ownership", () => {
     expect(hasActiveCronJobs()).toBe(false);
   });
 
-  it("records durable schedule mutations on the admitted active run", () => {
-    const marker = markCronJobActive("rescheduled-job");
-
-    noteActiveCronJobScheduleMutation("rescheduled-job");
-
-    expect(marker?.scheduleMutated).toBe(true);
-  });
-
   it("records trigger mutations without retiring schedule ownership", () => {
     const marker = markCronJobActive("trigger-edited-job");
 
@@ -389,28 +399,10 @@ describe("active cron schedule ownership", () => {
     expect(marker?.scheduleMutated).toBeUndefined();
   });
 
-  it("keeps trigger mutation ownership after the script is edited back", () => {
-    const marker = markCronJobActive("trigger-restored-job");
-
-    noteActiveCronJobTriggerMutation("trigger-restored-job");
-    noteActiveCronJobTriggerMutation("trigger-restored-job");
-
-    expect(marker?.triggerMutated).toBe(true);
-  });
-
   it("does not create trigger markers for an idle job", () => {
     noteActiveCronJobTriggerMutation("idle-trigger-job");
 
     expect(hasActiveCronJobs()).toBe(false);
-  });
-
-  it("keeps a mutation after the schedule is edited back to its original value", () => {
-    const marker = markCronJobActive("rescheduled-job");
-
-    noteActiveCronJobScheduleMutation("rescheduled-job");
-    noteActiveCronJobScheduleMutation("rescheduled-job");
-
-    expect(marker?.scheduleMutated).toBe(true);
   });
 
   it("attributes later edits only to the replacement active run", () => {

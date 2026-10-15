@@ -1,9 +1,10 @@
 import type { ApplicationContext } from "../../app/context.ts";
 import type { ChatAttachment, HumanMention } from "../../lib/chat/chat-types.ts";
-import { resolveCurrentUserIdentity } from "../../lib/chat/current-user-identity.ts";
 import { trimHumanMentions } from "../../lib/chat/human-mentions.ts";
 import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
+import { showToast } from "../../lib/toast.ts";
 import { buildChatApiAttachments } from "../chat/attachment-api.ts";
+import { attachmentBatchRejection } from "../chat/components/chat-attachment-admission.ts";
 import { prepareBackgroundSessionCompletion } from "./background-session-notice.ts";
 import type { NewSessionVisibility } from "./create-params.ts";
 import { buildSelectedSessionCreateParams } from "./draft-create-params.ts";
@@ -33,6 +34,13 @@ export function prepareDraftSubmission(
     startup ? startup.params.mentions : pendingPlacement ? pending.mentions : submitted.mentions
   )?.map(({ profileId, start, end }) => ({ profileId, start, end }));
   const attachments = draft.attachmentDraft.attachments;
+  if (!startup && !pendingPlacement) {
+    const error = attachmentBatchRejection(attachments, context.gateway.snapshot.hello?.policy);
+    if (error !== undefined) {
+      showToast({ message: error });
+      return null;
+    }
+  }
   const draftAttachments = startup
     ? startup.params.attachments
     : pendingPlacement
@@ -79,38 +87,5 @@ export function prepareDraftSubmission(
     recoveryScope,
     completeInBackground,
     hasInitialTurn: Boolean(message || apiAttachments?.length),
-  };
-}
-
-export function prepareDraftSubmissionTurn(
-  context: ApplicationContext,
-  input: NonNullable<ReturnType<typeof prepareDraftSubmission>>,
-  createdAt: number,
-) {
-  const { hello, selfUser } = context.gateway.snapshot;
-  const sender = resolveCurrentUserIdentity(hello, input.client.instanceId, selfUser) ?? undefined;
-  return {
-    text: input.message,
-    mentions: input.mentions,
-    attachments: input.attachments,
-    createdAt,
-    sender,
-  };
-}
-
-export function captureTerminalSubmissionInput(
-  place: DraftPlaceState,
-  catalogId: string,
-  initialMessage: string,
-) {
-  return {
-    catalogId,
-    agentId: normalizeAgentId(place.agentId),
-    hostId: place.terminalHostId,
-    cwd: place.folder.trim() || (place.terminalOnNode ? "" : place.workspacePath()),
-    initialMessage,
-    worktree: place.worktree,
-    worktreeName: place.worktreeName,
-    baseRef: place.baseRef,
   };
 }

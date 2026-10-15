@@ -260,6 +260,13 @@ describe("openrouter video generation provider", () => {
 
   afterEach(resetVideoMocks);
 
+  it("rejects a duration that rounds to zero before submission", async () => {
+    await expect(generateVideo({ prompt: "a lobster", durationSeconds: 0.4 })).rejects.toThrow(
+      "durationSeconds must be a positive duration",
+    );
+    expect(postJsonRequestMock).not.toHaveBeenCalled();
+  });
+
   it("declares explicit mode capabilities", () => {
     const provider = buildOpenRouterVideoGenerationProvider();
 
@@ -894,28 +901,43 @@ describe("openrouter video generation provider", () => {
     expect(oversized.wasCanceled()).toBe(true);
   });
 
-  it("rejects unknown OpenRouter poll statuses without waiting for timeout", async () => {
-    postJsonRequestMock.mockResolvedValue(
-      releasedJson({
-        id: "job-123",
-        polling_url: "/api/v1/videos/job-123",
-        status: "pending",
-      }),
-    );
-    fetchWithTimeoutGuardedMock.mockResolvedValueOnce(
-      releasedJson({
-        id: "job-123",
-        status: "nearly_done",
-      }),
-    );
+  it.each([
+    {
+      status: "nearly_done",
+      error: undefined,
+      expected: "OpenRouter video generation response malformed",
+    },
+    {
+      status: "failed",
+      error: "  ",
+      expected: "OpenRouter video generation failed",
+    },
+  ])(
+    "rejects poll status $status without waiting for timeout",
+    async ({ status, error, expected }) => {
+      postJsonRequestMock.mockResolvedValue(
+        releasedJson({
+          id: "job-123",
+          polling_url: "/api/v1/videos/job-123",
+          status: "pending",
+        }),
+      );
+      fetchWithTimeoutGuardedMock.mockResolvedValueOnce(
+        releasedJson({
+          id: "job-123",
+          status,
+          error,
+        }),
+      );
 
-    await expect(
-      generateVideo({
-        prompt: "bad status",
-      }),
-    ).rejects.toThrow("OpenRouter video generation response malformed");
-    expect(waitProviderOperationPollIntervalMock).not.toHaveBeenCalled();
-  });
+      await expect(
+        generateVideo({
+          prompt: "bad status",
+        }),
+      ).rejects.toThrow(expected);
+      expect(waitProviderOperationPollIntervalMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects malformed OpenRouter completed output URL arrays", async () => {
     postJsonRequestMock.mockResolvedValue(

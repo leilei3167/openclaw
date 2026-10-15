@@ -4,6 +4,7 @@ import type {
   SessionsListParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { resolveAgentDir, resolveAgentWorkspaceDir } from "../../agents/agent-scope-config.js";
+import { prepareSharedAuthStoreOwnershipForNative } from "../../agents/auth-profiles/path-resolve.native.js";
 import type { ModelCatalogEntry, ModelCatalogSnapshot } from "../../agents/model-catalog.types.js";
 import * as preparedRuntime from "../../agents/prepared-model-runtime.js";
 import { notifyPreparedModelRuntimePublication } from "../../agents/prepared-model-runtime.publication-events.js";
@@ -65,8 +66,9 @@ async function listSessions(params: {
 
 async function seedSessions(): Promise<OpenClawConfig> {
   const config: OpenClawConfig = {
-    agents: { list: [{ id: "main", default: true }, { id: "work" }] },
+    agents: { entries: { main: {}, work: {} } },
   };
+  setRuntimeConfigSnapshot(config);
   await upsertSessionEntryCore(
     { agentId: "main", sessionKey: "agent:main:active" },
     {
@@ -142,6 +144,7 @@ function publishedCatalogContext(
   config: OpenClawConfig,
   owners: ReadonlyMap<string, PreparedModelRuntimeSnapshot>,
 ): GatewayRequestContext {
+  prepareSharedAuthStoreOwnershipForNative();
   vi.spyOn(preparedRuntime, "getPreparedModelRuntimeSnapshot").mockImplementation((input) => {
     const owner = input.agentId ? owners.get(input.agentId) : undefined;
     return owner?.agentDir === input.agentDir ? owner : undefined;
@@ -266,8 +269,8 @@ describe("sessions.list catalog scoping", () => {
         expect(result.sessions[0]?.thinkingOptions).toContain(level);
         expect(result.defaults.thinkingOptions).toContain(level);
         if (level === "max") {
-          expect(result.sessions[0]?.thinkingOptions).not.toContain("ultra");
-          expect(result.defaults.thinkingOptions).not.toContain("ultra");
+          expect(result.sessions[0]?.thinkingOptions).toContain("ultra");
+          expect(result.defaults.thinkingOptions).toContain("ultra");
         }
         expect(owner.loadFullModelCatalog).not.toHaveBeenCalled();
         expect(JSON.stringify(result)).not.toContain('"metadataSnapshot":');
@@ -332,6 +335,7 @@ describe("sessions.list catalog scoping", () => {
       expect(first.sessions.find((row) => row.agentId === "work")?.thinkingOptions).toEqual([
         "off",
         "low",
+        "ultra",
       ]);
       const catalogs = vi.spyOn(context, "readPreparedGatewayModelCatalogBatch");
       expect((await listSessions(request)).sessions).toEqual(first.sessions);
@@ -352,18 +356,26 @@ describe("sessions.list catalog scoping", () => {
       expect(roster.agents.find((row) => row.id === "work")?.thinkingOptions).toEqual([
         "off",
         "low",
+        "ultra",
       ]);
 
-      // An empty replacement is authoritative even while the global registry still offers Ultra.
+      // An empty replacement restores the generic native ladder without disabling harness Ultra.
       owners.set("main", { ...mainOwner, pluginRegistry: createEmptyPluginRegistry() });
       notifyPreparedModelRuntimePublication({ phase: "published" });
       const replaced = await listSessions(request);
-      expect(
-        replaced.sessions.find((row) => row.agentId === "main")?.thinkingOptions,
-      ).not.toContain("ultra");
+      expect(replaced.sessions.find((row) => row.agentId === "main")?.thinkingOptions).toEqual([
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max",
+        "ultra",
+      ]);
       expect(replaced.sessions.find((row) => row.agentId === "work")?.thinkingOptions).toEqual([
         "off",
         "low",
+        "ultra",
       ]);
 
       failMainCatalogRead = true;
@@ -375,6 +387,7 @@ describe("sessions.list catalog scoping", () => {
       expect(partial.sessions.find((row) => row.agentId === "work")?.thinkingOptions).toEqual([
         "off",
         "low",
+        "ultra",
       ]);
       failMainCatalogRead = false;
 
@@ -387,10 +400,10 @@ describe("sessions.list catalog scoping", () => {
       expect(mainOwner.loadFullModelCatalog).not.toHaveBeenCalled();
 
       const workAgentDir = `${resolveAgentDir(config, "work")}-replacement`;
-      config.agents!.list = [
-        { id: "main", default: true },
-        { id: "work", agentDir: workAgentDir },
-      ];
+      config.agents!.entries = {
+        main: {},
+        work: { agentDir: workAgentDir },
+      };
       owners.set("work", {
         ...preparedOwner({ config, agentId: "work", entries, pluginRegistry: mainRegistry }),
         agentDir: workAgentDir,
@@ -405,10 +418,10 @@ describe("sessions.list catalog scoping", () => {
         ...config,
         agents: {
           ...config.agents,
-          list: [
-            { id: "main", default: true },
-            { id: "work", agentDir: `${workAgentDir}-next` },
-          ],
+          entries: {
+            main: {},
+            work: { agentDir: `${workAgentDir}-next` },
+          },
         },
       };
       currentConfig = nextConfig;
@@ -424,7 +437,7 @@ describe("sessions.list catalog scoping", () => {
       setRuntimeConfigSnapshot(nextConfig);
       const changedConfig = await listSessions(request);
       expect(changedConfig.sessions.find((row) => row.agentId === "work")?.thinkingOptions).toEqual(
-        ["off", "low"],
+        ["off", "low", "ultra"],
       );
     });
   });

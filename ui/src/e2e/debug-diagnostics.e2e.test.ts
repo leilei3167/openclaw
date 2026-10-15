@@ -2,7 +2,10 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { beforeEach, expect, it } from "vitest";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
-import { takeControlUiViewportScreenshot } from "../test-helpers/control-ui-e2e-screenshot.ts";
+import {
+  takeControlUiElementScreenshot,
+  takeControlUiViewportScreenshot,
+} from "../test-helpers/control-ui-e2e-screenshot.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { deviceSystemInfo } from "../test-helpers/devices-fixtures.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
@@ -29,6 +32,7 @@ suite.define(() => {
     await suite.withPage(
       {
         locale: "en-US",
+        colorScheme: "dark",
         serviceWorkers: "block",
         hasTouch: true,
         viewport: { height: 1000, width: 1280 },
@@ -42,6 +46,7 @@ suite.define(() => {
           : {}),
       },
       async ({ page }) => {
+        await page.clock.install();
         const activeRows = Array.from({ length: 101 }, (_, index) => ({
           key: index === 0 ? "global" : index === 1 ? "unknown" : `agent:main:older-${index}`,
           agentId: "main",
@@ -199,7 +204,8 @@ suite.define(() => {
           .toContain("432 MB");
         await expect
           .poll(() => overlay.locator(".gateway-vital--cpu").textContent())
-          .toContain("25%");
+          .toContain("0.25 cores");
+        await page.clock.runFor(10_000);
         await expect.poll(() => overlay.locator(".gateway-vital--cpu polyline").count()).toBe(1);
         if (captureUiProof) {
           await page.screenshot({
@@ -210,6 +216,11 @@ suite.define(() => {
         await overlay.getByRole("button", { name: "Minimize system busyness" }).click();
         const widget = page.locator("aside.debug-overlay--minimized");
         await widget.waitFor();
+        await widget.evaluate(async (element) => {
+          await new Promise(requestAnimationFrame);
+          await new Promise(requestAnimationFrame);
+          await Promise.all(element.getAnimations().map((animation) => animation.finished));
+        });
         expect(await widget.getByRole("heading", { name: "Lanes", exact: true }).count()).toBe(0);
         const metrics = ["cpu", "ping", "memory"];
         for (const metric of metrics) {
@@ -227,7 +238,7 @@ suite.define(() => {
           .toContain("432 MB");
         const desktopWidget = await widget.boundingBox();
         expect(desktopWidget).not.toBeNull();
-        expect(desktopWidget!.width).toBeLessThanOrEqual(210);
+        expect(desktopWidget!.width).toBeLessThanOrEqual(240);
         expect(desktopWidget!.height).toBeLessThanOrEqual(100);
         expect(1280 - desktopWidget!.x - desktopWidget!.width).toBeGreaterThanOrEqual(0);
         expect(1280 - desktopWidget!.x - desktopWidget!.width).toBeLessThanOrEqual(32);
@@ -238,6 +249,8 @@ suite.define(() => {
           10,
         );
         expect(Number.isFinite(initialPingMs)).toBe(true);
+        const ping = widget.locator(".gateway-vital--ping");
+        expect(await ping.getAttribute("data-degraded")).toBeNull();
         const nextSystemInfoCount = (await gateway.getRequests("system.info")).length;
         const minimizedCurrentWorkCount = (
           await gateway.getRequests("sessions.list", currentWorkQuery)
@@ -267,16 +280,17 @@ suite.define(() => {
             heapTotalBytes: 384 * 1_048_576,
           },
         });
+        await page.clock.runFor(10_000);
         await gateway.waitForRequest("system.info", { after: nextSystemInfoCount });
         // This delay is the simulated network latency the ping graph must measure.
-        await page.waitForTimeout(initialPingMs + 250);
+        await page.clock.runFor(initialPingMs + 250);
         await gateway.resolveDeferred("system.info");
         await expect
           .poll(() => widget.locator(".gateway-vital--memory").textContent())
           .toContain("654 MB");
         await expect
           .poll(() => widget.locator(".gateway-vital--cpu").textContent())
-          .toContain("75%");
+          .toContain("0.75 cores");
         await expect
           .poll(async () =>
             Number.parseInt(
@@ -286,6 +300,15 @@ suite.define(() => {
             ),
           )
           .toBeGreaterThanOrEqual(initialPingMs + 200);
+        if (captureUiProof) {
+          await writeFile(
+            path.join(proofDir, "ping-high.png"),
+            await takeControlUiElementScreenshot(page, widget, [ping]),
+          );
+        }
+        expect(await ping.getAttribute("data-degraded")).toBe("");
+        await page.clock.runFor(10_000);
+        await expect.poll(() => ping.getAttribute("data-degraded")).toBeNull();
         await gateway.waitForRequest("system.info", { after: systemInfoCount + 2 });
         expect(await gateway.getRequests("sessions.list", currentWorkQuery)).toHaveLength(
           minimizedCurrentWorkCount,
@@ -309,6 +332,22 @@ suite.define(() => {
         const cpuTrigger = widget.getByRole("button", { name: "Show Gateway CPU breakdown" });
         const cpuTooltip = widget.locator(".gateway-cpu-tooltip");
         const cpuDetail = cpuTooltip.locator(".gateway-cpu-detail");
+        const transitionCpuDetail = async (
+          eventName: "overlay-after-show" | "overlay-after-hide",
+          action: () => Promise<void>,
+        ) => {
+          // Visibility includes closing animations; finish each input mode before starting another.
+          await cpuTooltip.evaluate((element, transitionEvent) => {
+            element.removeAttribute("data-test-transition");
+            element.addEventListener(
+              transitionEvent,
+              () => element.setAttribute("data-test-transition", transitionEvent),
+              { once: true },
+            );
+          }, eventName);
+          await action();
+          await expect.poll(() => cpuTooltip.getAttribute("data-test-transition")).toBe(eventName);
+        };
         await expect
           .poll(() => widget.locator(".sparkline-tile__secondary").textContent())
           .toContain("Host 34%");
@@ -319,13 +358,12 @@ suite.define(() => {
         for (const reading of [
           "Main thread",
           "42%",
-          "Tracked workers",
+          "Worker threads",
           "28%",
           "Other threads",
-          "5%",
+          "≈5%",
           "Host · 8 logical CPUs",
           "34%",
-          "100% = one logical CPU",
         ]) {
           expect(cpuText).toContain(reading);
         }
@@ -341,30 +379,37 @@ suite.define(() => {
             path: path.join(proofDir, "cpu-breakdown-desktop.png"),
           });
         }
-        await page.keyboard.press("Escape");
+        await transitionCpuDetail("overlay-after-hide", () => page.keyboard.press("Escape"));
         await expect.poll(() => cpuDetail.isVisible()).toBe(false);
         expect(await widget.isVisible()).toBe(true);
         await cpuTrigger.blur();
         await page.keyboard.press("Tab");
         await cpuTrigger.focus();
         await expect.poll(() => cpuDetail.isVisible()).toBe(true);
-        await page.keyboard.press("Escape");
+        await transitionCpuDetail("overlay-after-hide", () => page.keyboard.press("Escape"));
         await page.setViewportSize({ height: 844, width: 390 });
         const mobileWidget = await widget.boundingBox();
         expect(mobileWidget).not.toBeNull();
-        expect(mobileWidget!.width).toBeLessThanOrEqual(210);
+        expect(mobileWidget!.width).toBeLessThanOrEqual(240);
         expect(mobileWidget!.height).toBeLessThanOrEqual(100);
         expect(mobileWidget!.x).toBeGreaterThanOrEqual(0);
         expect(mobileWidget!.y).toBeGreaterThanOrEqual(0);
         expect(mobileWidget!.x + mobileWidget!.width).toBeLessThanOrEqual(390);
         expect(mobileWidget!.y + mobileWidget!.height).toBeLessThanOrEqual(844);
+        expect(
+          await widget
+            .locator(".sparkline-tile__label, .sparkline-tile__value")
+            .evaluateAll((elements) =>
+              elements.every((element) => element.scrollWidth <= element.clientWidth),
+            ),
+        ).toBe(true);
         if (captureUiProof) {
           await page.screenshot({
             animations: "disabled",
             path: path.join(proofDir, "system-busyness-minimized-mobile.png"),
           });
         }
-        await cpuTrigger.tap();
+        await transitionCpuDetail("overlay-after-show", () => cpuTrigger.tap());
         await expect.poll(() => cpuDetail.isVisible()).toBe(true);
         const detailBounds = await cpuDetail.boundingBox();
         expect(detailBounds!.x).toBeGreaterThanOrEqual(0);
@@ -377,7 +422,7 @@ suite.define(() => {
             path: path.join(proofDir, "cpu-breakdown-mobile.png"),
           });
         }
-        await cpuTrigger.tap();
+        await transitionCpuDetail("overlay-after-hide", () => cpuTrigger.tap());
         await expect.poll(() => cpuDetail.isVisible()).toBe(false);
         await page.setViewportSize({ height: 1000, width: 1280 });
         for (const scenario of [
@@ -417,9 +462,10 @@ suite.define(() => {
               heapTotalBytes: 384 * 1_048_576,
             },
           });
+          await page.clock.runFor(10_000);
           await expect
             .poll(() => widget.locator(".gateway-vital--cpu .sparkline-tile__value").textContent())
-            .toContain(`${Math.round(scenario.total * 100)}%`);
+            .toContain(`${scenario.total.toFixed(2)} cores`);
           await expect
             .poll(() => widget.locator(".sparkline-tile__secondary").textContent())
             .toContain(
@@ -433,7 +479,25 @@ suite.define(() => {
               path: path.join(proofDir, `cpu-${scenario.name}.png`),
             });
           }
-          await page.keyboard.press("Escape");
+          if (captureUiProof && scenario.name === "workers-hot") {
+            for (const viewport of [
+              { name: "desktop", width: 1280, height: 1000 },
+              { name: "mobile", width: 390, height: 844 },
+            ]) {
+              await page.setViewportSize({ width: viewport.width, height: viewport.height });
+              const popup = cpuTooltip.locator('[part="body"]');
+              await writeFile(
+                path.join(proofDir, `cpu-workers-hot-${viewport.name}-tooltip.png`),
+                await takeControlUiElementScreenshot(page, popup, [cpuDetail]),
+              );
+              await page.screenshot({
+                animations: "disabled",
+                path: path.join(proofDir, `cpu-workers-hot-${viewport.name}.png`),
+              });
+            }
+            await page.setViewportSize({ width: 1280, height: 1000 });
+          }
+          await transitionCpuDetail("overlay-after-hide", () => page.keyboard.press("Escape"));
         }
         await widget.getByRole("button", { name: "Expand system busyness" }).click();
         await widget.waitFor({ state: "detached" });
@@ -466,6 +530,7 @@ suite.define(() => {
           await gateway.getRequests("sessions.list", { ...currentWorkQuery, offset: 100 }),
         ).toHaveLength(0);
         await gateway.setMethodResponse("sessions.list", listing([]));
+        await page.clock.runFor(10_000);
         await activeRuns.getByText("No active runs.", { exact: true }).waitFor();
         expect((await activeCount.textContent())?.trim()).toBe("0 active");
         expect(await activeRuns.locator("li").count()).toBe(0);
@@ -487,9 +552,8 @@ suite.define(() => {
         await gateway.deferNext("status");
         await refresh.click();
         await gateway.waitForRequest("status", { after: statusRequestCount });
-        await expect
-          .poll(() => snapshots.textContent())
-          .toContain("Refreshing Gateway diagnostics.");
+        await expect.poll(() => refresh.textContent()).toMatch(/^\s*Refreshing…\s*$/u);
+        expect(await refresh.isDisabled()).toBe(true);
         await expect.poll(() => snapshots.textContent()).toContain("diagnostics-e2e");
         expect(
           await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
@@ -506,16 +570,17 @@ suite.define(() => {
         await page.getByRole("button", { name: /^Open overlay/u }).click();
         await expect
           .poll(() => overlay.locator(".gateway-vital--cpu").textContent())
-          .toContain("50%");
+          .toContain("0.50 cores");
         await overlay.getByRole("button", { name: "Minimize system busyness" }).click();
         await widget.waitFor();
         await gateway.setOnline(false);
         await expect.poll(() => widget.textContent()).toContain("Unavailable");
-        expect(await widget.textContent()).not.toContain("50%");
+        expect(await widget.textContent()).not.toContain("0.50 cores");
         expect(await widget.textContent()).not.toContain("654 MB");
+        await expect.poll(() => snapshots.textContent()).toContain("Offline");
         await expect
           .poll(() => snapshots.textContent())
-          .toMatch(/Offline\s+Connect to the Gateway/u);
+          .toContain("Connect to the Gateway to refresh diagnostics.");
         expect(await refresh.isDisabled()).toBe(true);
         await expect.poll(() => snapshots.textContent()).toContain("diagnostics-e2e");
         await page.setViewportSize({ height: 844, width: 390 });
